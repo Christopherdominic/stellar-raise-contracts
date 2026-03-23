@@ -15,6 +15,8 @@ mod proptest_generator_boundary;
 mod proptest_generator_boundary_tests;
 #[cfg(test)]
 mod test;
+#[cfg(test)]
+mod stellar_token_minter_test;
 
 const CONTRACT_VERSION: u32 = 3;
 #[allow(dead_code)]
