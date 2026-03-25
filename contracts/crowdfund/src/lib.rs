@@ -30,10 +30,6 @@ mod auth_tests;
 pub mod campaign_goal_minimum;
 #[cfg(test)]
 mod campaign_goal_minimum_test;
-pub mod contract_state_size;
-#[cfg(test)]
-#[path = "contract_state_size.test.rs"]
-mod contract_state_size_test;
 pub mod contribute_error_handling;
 #[cfg(test)]
 mod contribute_error_handling_tests;

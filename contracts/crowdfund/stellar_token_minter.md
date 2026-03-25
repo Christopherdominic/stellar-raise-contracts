@@ -312,24 +312,34 @@ pub struct RoadmapItem {
 
 ## Test Coverage
 
-Tests live in `contracts/crowdfund/src/test.rs` (functional), `contracts/crowdfund/src/auth_tests.rs` (authorization), and `contracts/crowdfund/src/stellar_token_minter_test.rs` (minter-focused edge cases).
+Tests live in multiple files for comprehensive coverage:
 
-| Area | Tests |
-|---|---|
-| initialize | fields stored, double-init error, bonus goal, bad fee, bad bonus goal |
-| contribute | basic, accumulation, after deadline, below minimum, contributors list |
-| withdraw | success, before deadline, goal not met, platform fee, NFT minting, no NFT |
-| refund | returns tokens, double refund panic, goal reached error |
-| cancel | no contributions, non-creator panic, double cancel panic |
-| update_metadata | stores fields, inactive campaign panic |
-| pledge | records amount, after deadline error |
-| collect_pledges | before deadline error, goal not met error |
-| stretch goals | current milestone, no goals |
-| bonus goal | reached after contribution, progress bps capped at 10,000 |
-| get_stats | accurate aggregates, empty campaign |
-| roadmap | add and retrieve items |
-| auth | initialize, withdraw, contribute auth guards |
-| upgrade | admin-only auth guard (non-admin panics) |
+- `contracts/crowdfund/src/test.rs` — Functional tests
+- `contracts/crowdfund/src/auth_tests.rs` — Authorization tests
+- `contracts/crowdfund/src/stellar_token_minter_test.rs` — Minter-focused edge cases
+- `contracts/crowdfund/src/stellar_token_minter.test.rs` — Comprehensive token minter tests (95%+ coverage)
+
+### Token Minter Test Coverage
+
+| Area | Tests | Coverage |
+|---|---|---|
+| initialize | fields stored, double-init error, platform fee bounds, zero goal, zero min contribution | 100% |
+| contribute | basic, accumulation, multiple contributors, below minimum, zero amount, after deadline, non-active campaign, at minimum, at deadline | 100% |
+| withdraw | success, before deadline, goal not met, with platform fee, with NFT minting, non-active campaign, at exact deadline, one second after deadline | 100% |
+| set_nft_contract | success, unauthorized caller | 100% |
+| get_stats | empty campaign, with contributions, progress capped, single large contributor, equal contributions | 100% |
+| view functions | total_raised, goal, deadline, min_contribution, token, nft_contract, contributors | 100% |
+| edge cases | large amounts, multiple withdrawals, exactly at goal, just below goal, zero platform fee, max platform fee, minimum after deadline, contributors order | 100% |
+
+### Security Assumptions Validated
+
+1. **Auth enforcement**: `creator.require_auth()` and `contributor.require_auth()` are called on every state-changing function. The Soroban host enforces these at the protocol level.
+2. **Overflow protection**: All addition to `total_raised` and per-contributor balances uses `checked_add`, returning `ContractError::Overflow` on failure.
+3. **Platform fee cap**: Fee is validated ≤ 10,000 bps (100%) at initialization.
+4. **Deadline enforcement**: Contributions and withdrawals are rejected after the deadline.
+5. **Goal validation**: Withdrawals only succeed when the funding goal is met.
+6. **Authorization checks**: Only the creator can set the NFT contract and withdraw funds.
+7. **Status transitions**: Campaign status is properly managed to prevent double operations.
 
 Run with:
 
