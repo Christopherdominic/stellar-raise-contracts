@@ -1,12 +1,11 @@
-//! Tests for `refund_single_token` — validate_refund_preconditions and
-//! execute_refund_single.
+//! Tests for `refund_single_token` — validate_refund_preconditions,
+//! execute_refund_single, and refund_single_transfer.
 //!
 //! ## Security notes
 //! - CEI order: storage is zeroed before the token transfer; the double-refund
 //!   test confirms a second call returns `NothingToRefund`.
-//! - Direction lock: The token transfer explicitly uses the contract's address
-//!   as the sender and the contributor as the recipient; the balance assertions
-//!   confirm direction.
+//! - Direction lock: `refund_single_transfer` always transfers contract →
+//!   contributor; balance assertions confirm direction.
 //! - Overflow protection: `execute_refund_single` uses `checked_sub` on
 //!   `total_raised`; the large-amount test exercises this path.
 
@@ -67,6 +66,7 @@ fn test_validate_returns_amount_on_success() {
     client.contribute(&alice, &50_000);
 
     env.ledger().set_timestamp(deadline + 1);
+    client.finalize(); // Active → Expired
 
     let result = env.as_contract(&client.address, || {
         validate_refund_preconditions(&env, &alice)
@@ -74,8 +74,9 @@ fn test_validate_returns_amount_on_success() {
     assert_eq!(result, Ok(50_000));
 }
 
-/// @test Returns CampaignStillActive when deadline has not passed.
+/// @test Panics when campaign is still Active (deadline not passed, not finalized).
 #[test]
+#[should_panic(expected = "campaign must be in Expired state to refund")]
 fn test_validate_before_deadline_returns_campaign_still_active() {
     let (env, client, creator, token) = setup();
     let deadline = env.ledger().timestamp() + 3_600;
@@ -85,15 +86,15 @@ fn test_validate_before_deadline_returns_campaign_still_active() {
     mint(&env, &token, &alice, 50_000);
     client.contribute(&alice, &50_000);
 
-    // Do NOT advance past deadline
-    let result = env.as_contract(&client.address, || {
-        validate_refund_preconditions(&env, &alice)
+    // Do NOT advance past deadline — campaign stays Active
+    env.as_contract(&client.address, || {
+        validate_refund_preconditions(&env, &alice).unwrap();
     });
-    assert_eq!(result, Err(ContractError::CampaignStillActive));
 }
 
-/// @test Returns CampaignStillActive when called exactly at the deadline.
+/// @test Panics when campaign is Active at the deadline boundary.
 #[test]
+#[should_panic(expected = "campaign must be in Expired state to refund")]
 fn test_validate_at_deadline_boundary_returns_campaign_still_active() {
     let (env, client, creator, token) = setup();
     let deadline = env.ledger().timestamp() + 3_600;
@@ -103,15 +104,15 @@ fn test_validate_at_deadline_boundary_returns_campaign_still_active() {
     mint(&env, &token, &alice, 50_000);
     client.contribute(&alice, &50_000);
 
-    env.ledger().set_timestamp(deadline); // exactly at, not past
-    let result = env.as_contract(&client.address, || {
-        validate_refund_preconditions(&env, &alice)
+    env.ledger().set_timestamp(deadline); // exactly at, not past — finalize would fail
+    env.as_contract(&client.address, || {
+        validate_refund_preconditions(&env, &alice).unwrap();
     });
-    assert_eq!(result, Err(ContractError::CampaignStillActive));
 }
 
-/// @test Returns GoalReached when total_raised >= goal.
+/// @test Panics when campaign is Succeeded (goal was met).
 #[test]
+#[should_panic(expected = "campaign must be in Expired state to refund")]
 fn test_validate_goal_reached_returns_goal_reached() {
     let (env, client, creator, token) = setup();
     let deadline = env.ledger().timestamp() + 3_600;
@@ -123,14 +124,16 @@ fn test_validate_goal_reached_returns_goal_reached() {
     client.contribute(&alice, &goal);
 
     env.ledger().set_timestamp(deadline + 1);
-    let result = env.as_contract(&client.address, || {
-        validate_refund_preconditions(&env, &alice)
+    client.finalize(); // Active → Succeeded
+
+    env.as_contract(&client.address, || {
+        validate_refund_preconditions(&env, &alice).unwrap();
     });
-    assert_eq!(result, Err(ContractError::GoalReached));
 }
 
-/// @test Returns GoalReached when total_raised exceeds goal.
+/// @test Panics when campaign is Succeeded (goal exceeded).
 #[test]
+#[should_panic(expected = "campaign must be in Expired state to refund")]
 fn test_validate_goal_exceeded_returns_goal_reached() {
     let (env, client, creator, token) = setup();
     let deadline = env.ledger().timestamp() + 3_600;
@@ -142,10 +145,11 @@ fn test_validate_goal_exceeded_returns_goal_reached() {
     client.contribute(&alice, &(goal + 50_000));
 
     env.ledger().set_timestamp(deadline + 1);
-    let result = env.as_contract(&client.address, || {
-        validate_refund_preconditions(&env, &alice)
+    client.finalize(); // Active → Succeeded
+
+    env.as_contract(&client.address, || {
+        validate_refund_preconditions(&env, &alice).unwrap();
     });
-    assert_eq!(result, Err(ContractError::GoalReached));
 }
 
 /// @test Returns NothingToRefund for an address with no contribution.
@@ -157,6 +161,7 @@ fn test_validate_no_contribution_returns_nothing_to_refund() {
 
     let stranger = Address::generate(&env);
     env.ledger().set_timestamp(deadline + 1);
+    client.finalize(); // Active → Expired
 
     let result = env.as_contract(&client.address, || {
         validate_refund_preconditions(&env, &stranger)
@@ -164,7 +169,7 @@ fn test_validate_no_contribution_returns_nothing_to_refund() {
     assert_eq!(result, Err(ContractError::NothingToRefund));
 }
 
-/// @test Returns NothingToRefund after contribution has been zeroed.
+/// @test Returns NothingToRefund after contribution has been zeroed by a prior refund.
 #[test]
 fn test_validate_after_refund_returns_nothing_to_refund() {
     let (env, client, creator, token) = setup();
@@ -176,6 +181,7 @@ fn test_validate_after_refund_returns_nothing_to_refund() {
     client.contribute(&alice, &10_000);
 
     env.ledger().set_timestamp(deadline + 1);
+    client.finalize(); // Active → Expired
 
     // First refund via the contract method (zeroes storage)
     client.refund_single(&alice);
@@ -186,9 +192,9 @@ fn test_validate_after_refund_returns_nothing_to_refund() {
     assert_eq!(result, Err(ContractError::NothingToRefund));
 }
 
-/// @test Panics with "campaign is not active" on a Successful campaign.
+/// @test Panics with "campaign must be in Expired state to refund" on a Succeeded campaign.
 #[test]
-#[should_panic(expected = "campaign is not active")]
+#[should_panic(expected = "campaign must be in Expired state to refund")]
 fn test_validate_panics_on_successful_campaign() {
     let (env, client, creator, token) = setup();
     let deadline = env.ledger().timestamp() + 3_600;
@@ -200,16 +206,17 @@ fn test_validate_panics_on_successful_campaign() {
     client.contribute(&alice, &goal);
 
     env.ledger().set_timestamp(deadline + 1);
-    client.withdraw(); // → Successful
+    client.finalize(); // → Succeeded
+    client.withdraw();
 
     env.as_contract(&client.address, || {
         validate_refund_preconditions(&env, &alice).unwrap();
     });
 }
 
-/// @test Panics with "campaign is not active" on a Cancelled campaign.
+/// @test Panics with "campaign must be in Expired state to refund" on a Cancelled campaign.
 #[test]
-#[should_panic(expected = "campaign is not active")]
+#[should_panic(expected = "campaign must be in Expired state to refund")]
 fn test_validate_panics_on_cancelled_campaign() {
     let (env, client, creator, token) = setup();
     let deadline = env.ledger().timestamp() + 3_600;
@@ -252,7 +259,7 @@ fn test_execute_transfers_correct_amount() {
     assert_eq!(tc.balance(&alice), before + 75_000);
 }
 
-/// @test Zeroes the contribution record before the transfer (CEI).
+/// @test Zeroes the contribution record (CEI — effects before interactions).
 #[test]
 fn test_execute_zeroes_storage_before_transfer() {
     let (env, client, creator, token) = setup();
@@ -297,7 +304,7 @@ fn test_execute_decrements_total_raised() {
     assert_eq!(client.total_raised(), 20_000);
 }
 
-/// @test A second execute call for the same contributor transfers 0 (double-refund prevention).
+/// @test A second execute call with amount=0 is a no-op (double-refund prevention).
 #[test]
 fn test_execute_double_refund_prevention() {
     let (env, client, creator, token) = setup();
@@ -312,19 +319,16 @@ fn test_execute_double_refund_prevention() {
 
     let tc = token::Client::new(&env, &token);
 
-    // First execute — valid
     env.as_contract(&client.address, || {
         execute_refund_single(&env, &alice, 25_000).unwrap();
     });
     assert_eq!(tc.balance(&alice), 25_000);
 
-    // Second execute with amount=0 — no-op (storage already zeroed)
+    // amount=0 — no transfer, no state change
     env.as_contract(&client.address, || {
-        // amount=0 would be caught by validate before reaching execute in
-        // production; here we confirm execute itself handles it gracefully.
         execute_refund_single(&env, &alice, 0).unwrap();
     });
-    assert_eq!(tc.balance(&alice), 25_000); // unchanged
+    assert_eq!(tc.balance(&alice), 25_000);
 }
 
 /// @test execute_refund_single handles a large amount without overflow.
@@ -369,6 +373,5 @@ fn test_execute_does_not_affect_other_contributors() {
         execute_refund_single(&env, &alice, 10_000).unwrap();
     });
 
-    // Bob's record must be untouched
     assert_eq!(client.contribution(&bob), 15_000);
 }
