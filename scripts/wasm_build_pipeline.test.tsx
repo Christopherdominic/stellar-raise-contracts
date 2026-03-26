@@ -19,6 +19,7 @@ import {
   DEFAULT_CACHE_TTL_MS,
   SCRIPT_CACHE_TTL_MS,
   MAX_CACHE_VALUE_BYTES,
+  MAX_CACHE_ENTRIES,
   SUPPORTED_NETWORKS,
   ScriptDeployInput,
 } from './wasm_build_pipeline';

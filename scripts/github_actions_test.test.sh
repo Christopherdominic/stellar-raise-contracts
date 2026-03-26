@@ -188,6 +188,78 @@ echo "name: Spellcheck" > "$tmpdir8/.github/workflows/spellcheck.yml"
 
 assert_exit "fails when rust_ci.yml is missing the frontend job" 1 bash -c "cd '$tmpdir8' && bash '$OLDPWD/$SCRIPT'"
 
+# ── Test 10: fails when smoke test calls non-existent get_stats ───────────────
+
+tmpdir9=$(mktemp -d)
+trap 'rm -rf "$tmpdir9"' EXIT
+
+mkdir -p "$tmpdir9/.github/workflows"
+echo "name: Rust CI"    > "$tmpdir9/.github/workflows/rust_ci.yml"
+echo "name: Spellcheck" > "$tmpdir9/.github/workflows/spellcheck.yml"
+cat > "$tmpdir9/.github/workflows/testnet_smoke.yml" <<'EOF'
+name: Smoke
+jobs:
+  smoke-test:
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --target wasm32-unknown-unknown --release -p crowdfund
+      - run: stellar contract invoke --id $ID -- initialize --admin $A --creator $A --token T --goal 1000 --deadline 9999 --min_contribution 1
+      - run: stellar contract invoke --id $ID -- get_stats
+EOF
+
+assert_exit "fails when smoke test calls non-existent get_stats" 1 bash -c "cd '$tmpdir9' && bash '$OLDPWD/$SCRIPT'"
+
+# ── Test 11: fails when rust_ci.yml has no timeout-minutes ────────────────────
+
+tmpdir10=$(mktemp -d)
+trap 'rm -rf "$tmpdir10"' EXIT
+
+mkdir -p "$tmpdir10/.github/workflows"
+cat > "$tmpdir10/.github/workflows/rust_ci.yml" <<'EOF'
+name: Rust CI
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --release --target wasm32-unknown-unknown -p crowdfund
+EOF
+echo "name: Smoke"      > "$tmpdir10/.github/workflows/testnet_smoke.yml"
+echo "name: Spellcheck" > "$tmpdir10/.github/workflows/spellcheck.yml"
+
+assert_exit "fails when rust_ci.yml has no timeout-minutes" 1 bash -c "cd '$tmpdir10' && bash '$OLDPWD/$SCRIPT'"
+
+# ── Test 12: fails when rust_ci.yml has no elapsed-time logging ───────────────
+
+tmpdir11=$(mktemp -d)
+trap 'rm -rf "$tmpdir11"' EXIT
+
+mkdir -p "$tmpdir11/.github/workflows"
+cat > "$tmpdir11/.github/workflows/rust_ci.yml" <<'EOF'
+name: Rust CI
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build crowdfund WASM for tests
+        timeout-minutes: 10
+        run: cargo build --release --target wasm32-unknown-unknown -p crowdfund
+EOF
+echo "name: Smoke"      > "$tmpdir11/.github/workflows/testnet_smoke.yml"
+echo "name: Spellcheck" > "$tmpdir11/.github/workflows/spellcheck.yml"
+
+assert_exit "fails when rust_ci.yml has no elapsed-time logging" 1 bash -c "cd '$tmpdir11' && bash '$OLDPWD/$SCRIPT'"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

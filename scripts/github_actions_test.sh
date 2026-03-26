@@ -76,7 +76,7 @@ fi
 
 # ── Check 4: smoke test does not call non-existent contract functions ──────────
 
-for bad_fn in "is_initialized" "get_campaign_info"; do
+for bad_fn in "is_initialized" "get_campaign_info" "get_stats"; do
   if grep -qF -- "-- $bad_fn" "$WORKFLOWS_DIR/testnet_smoke.yml"; then
     fail "testnet_smoke.yml calls non-existent contract function: $bad_fn"
   else
@@ -114,6 +114,31 @@ if ! grep -qE "^  frontend:" "$WORKFLOWS_DIR/rust_ci.yml"; then
   fail "rust_ci.yml is missing a 'frontend' job for UI tests"
 else
   pass "rust_ci.yml includes a 'frontend' job for UI tests"
+fi
+
+# ── Check 9: rust_ci.yml check job has a timeout-minutes bound ────────────────
+
+if ! grep -qE "timeout-minutes:" "$WORKFLOWS_DIR/rust_ci.yml"; then
+  fail "rust_ci.yml check job is missing timeout-minutes (runaway build risk)"
+else
+  pass "rust_ci.yml has timeout-minutes bound"
+fi
+
+# ── Check 10: rust_ci.yml WASM build step has a timeout-minutes bound ─────────
+
+wasm_timeout=$(awk '/Build crowdfund WASM/,/run:/' "$WORKFLOWS_DIR/rust_ci.yml" | grep -c "timeout-minutes:" || true)
+if [[ "$wasm_timeout" -eq 0 ]]; then
+  fail "rust_ci.yml WASM build step is missing timeout-minutes"
+else
+  pass "rust_ci.yml WASM build step has timeout-minutes bound"
+fi
+
+# ── Check 11: rust_ci.yml includes elapsed-time logging step ──────────────────
+
+if ! grep -qE "elapsed|JOB_START" "$WORKFLOWS_DIR/rust_ci.yml"; then
+  fail "rust_ci.yml is missing elapsed-time logging step"
+else
+  pass "rust_ci.yml includes elapsed-time logging"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────

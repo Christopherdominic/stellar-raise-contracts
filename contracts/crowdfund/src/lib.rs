@@ -666,7 +666,7 @@ impl CrowdfundContract {
                 .expect("fee division by zero");
 
             token_client.transfer(&env.current_contract_address(), &config.address, &fee);
-            withdraw_event_emission::emit_fee_transferred(&env, &config.address, fee);
+            withdraw_event_emission::emit_fee_transferred(&env, &config.address, fee, config.fee_bps);
             total.checked_sub(fee).expect("creator payout underflow")
         } else {
             total

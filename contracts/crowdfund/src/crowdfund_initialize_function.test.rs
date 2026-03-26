@@ -43,7 +43,18 @@ use crate::{ContractError, CrowdfundContract, CrowdfundContractClient, PlatformC
 fn setup() -> (Env, CrowdfundContractClient<'static>, Address, Address) {
     let env = Env::default();
     env.mock_all_auths();
+    env
+}
 
+/// Registers the contract and returns (env, client, creator, token, admin).
+fn setup() -> (
+    Env,
+    CrowdfundContractClient<'static>,
+    Address,
+    Address,
+    Address,
+) {
+    let env = make_env();
     let contract_id = env.register(CrowdfundContract, ());
     let client = CrowdfundContractClient::new(&env, &contract_id);
 
@@ -55,7 +66,54 @@ fn setup() -> (Env, CrowdfundContractClient<'static>, Address, Address) {
     let creator = Address::generate(&env);
     token_admin_client.mint(&creator, &10_000_000);
 
-    (env, client, creator, token_address)
+/// Roadmap is empty immediately after initialization.
+#[test]
+fn test_initialize_roadmap_is_empty() {
+    let (env, client, creator, token, _admin) = setup();
+    let deadline = env.ledger().timestamp() + 3600;
+    default_init(&client, &creator, &token, deadline);
+    assert_eq!(client.roadmap().len(), 0);
+}
+
+/// total_raised is zero immediately after initialization.
+#[test]
+fn test_initialize_total_raised_is_zero() {
+    let (env, client, creator, token, _admin) = setup();
+    let deadline = env.ledger().timestamp() + 3600;
+    default_init(&client, &creator, &token, deadline);
+    assert_eq!(client.total_raised(), 0);
+}
+
+/// An `initialized` event is emitted on success.
+#[test]
+fn test_initialize_emits_event() {
+    let (env, client, creator, token, _admin) = setup();
+    let deadline = env.ledger().timestamp() + 3600;
+    default_init(&client, &creator, &token, deadline);
+
+    let events = env.events().all();
+    assert!(!events.is_empty());
+}
+
+/// Admin address is stored correctly.
+#[test]
+fn test_initialize_stores_admin_address() {
+    let (env, client, creator, token, _admin) = setup();
+    let deadline = env.ledger().timestamp() + 3600;
+    let admin = Address::generate(&env);
+    
+    client.initialize(
+        &admin,
+        &creator,
+        &token,
+        &1_000_000,
+        &deadline,
+        &1_000,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
 }
 
 /// Calls `initialize()` with sensible defaults and returns the admin used.
@@ -366,7 +424,7 @@ fn test_initialize_accepts_fee_at_100_percent() {
         &1_000_000,
         &deadline,
         &1_000,
-        &Some(cfg),
+        &Some(config),
         &None,
         &None,
         &None,
@@ -423,7 +481,6 @@ fn test_initialize_rejects_bonus_goal_equal_to_goal() {
         &deadline,
         &1_000,
         &None,
-        &Some(1_000_000),
         &None,
         &None,
         &None,
@@ -460,6 +517,10 @@ fn test_initialize_rejects_bonus_goal_below_goal() {
     assert_eq!(
         result.unwrap_err().unwrap(),
         ContractError::InvalidBonusGoal
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        ContractError::InvalidPlatformFee
     );
 }
 
@@ -502,7 +563,7 @@ fn test_initialize_stores_bonus_goal_with_description() {
         &deadline,
         &1_000,
         &None,
-        &Some(2_000_000),
+        &Some(2_000_000i128),
         &Some(desc.clone()),
         &None,
         &None,

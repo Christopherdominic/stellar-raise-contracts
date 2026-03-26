@@ -452,3 +452,181 @@ fn test_emit_withdrawn_allows_zero_nft_count() {
     let env = Env::default();
     emit_withdrawn(&env, &Address::generate(&env), 500, 0);
 }
+
+// ── Security: fee_bps in fee_transferred event ───────────────────────────────
+
+/// `fee_transferred` event data includes fee_bps for independent verification.
+#[test]
+fn test_fee_transferred_event_data_includes_fee_bps() {
+    use soroban_sdk::TryFromVal;
+
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(CrowdfundContract, ());
+    let client = CrowdfundContractClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_addr = token_id.address();
+    let sac = token::StellarAssetClient::new(&env, &token_addr);
+
+    let creator = Address::generate(&env);
+    let platform_addr = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 3600;
+    let goal: i128 = 1_000_000;
+    let fee_bps: u32 = 300; // 3%
+
+    let config = PlatformConfig {
+        address: platform_addr.clone(),
+        fee_bps,
+    };
+
+    client.initialize(
+        &creator,
+        &creator,
+        &token_addr,
+        &goal,
+        &deadline,
+        &1,
+        &Some(config),
+        &None,
+        &None,
+    );
+
+    let contributor = Address::generate(&env);
+    sac.mint(&contributor, &goal);
+    client.contribute(&contributor, &goal);
+    env.ledger().set_timestamp(deadline + 1);
+    client.withdraw();
+
+    let data = first_event_data(&env, "campaign", "fee_transferred")
+        .expect("fee_transferred event not found");
+    let tuple: (Address, i128, u32) =
+        <(Address, i128, u32)>::try_from_val(&env, &data).expect("data shape mismatch");
+
+    // fee = 1_000_000 * 300 / 10_000 = 30_000
+    assert_eq!(tuple.1, 30_000, "fee amount mismatch");
+    assert_eq!(tuple.2, fee_bps, "fee_bps must be included in event data");
+}
+
+/// `fee_transferred` event fee_bps matches the configured platform fee.
+#[test]
+fn test_fee_transferred_event_fee_bps_matches_config() {
+    use soroban_sdk::TryFromVal;
+
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(CrowdfundContract, ());
+    let client = CrowdfundContractClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token_addr = token_id.address();
+    let sac = token::StellarAssetClient::new(&env, &token_addr);
+
+    let creator = Address::generate(&env);
+    let platform_addr = Address::generate(&env);
+    let deadline = env.ledger().timestamp() + 3600;
+    let goal: i128 = 500_000;
+    let fee_bps: u32 = 100; // 1%
+
+    let config = PlatformConfig {
+        address: platform_addr.clone(),
+        fee_bps,
+    };
+
+    client.initialize(
+        &creator,
+        &creator,
+        &token_addr,
+        &goal,
+        &deadline,
+        &1,
+        &Some(config),
+        &None,
+        &None,
+    );
+
+    let contributor = Address::generate(&env);
+    sac.mint(&contributor, &goal);
+    client.contribute(&contributor, &goal);
+    env.ledger().set_timestamp(deadline + 1);
+    client.withdraw();
+
+    let data = first_event_data(&env, "campaign", "fee_transferred")
+        .expect("fee_transferred event not found");
+    let tuple: (Address, i128, u32) =
+        <(Address, i128, u32)>::try_from_val(&env, &data).expect("data shape mismatch");
+    assert_eq!(tuple.2, fee_bps);
+}
+
+// ── Security: timestamp in withdrawn event ───────────────────────────────────
+
+/// `withdrawn` event data includes the ledger timestamp.
+#[test]
+fn test_withdrawn_event_includes_ledger_timestamp() {
+    use soroban_sdk::TryFromVal;
+
+    let contribution: i128 = 2_000;
+    let (env, client, _creator, _token) = setup_no_nft(contribution);
+
+    let ts = env.ledger().timestamp();
+    client.withdraw();
+
+    let data =
+        first_event_data(&env, "campaign", "withdrawn").expect("withdrawn event not found");
+    let tuple: (Address, i128, u32, u64) =
+        <(Address, i128, u32, u64)>::try_from_val(&env, &data).expect("data shape mismatch");
+
+    assert_eq!(tuple.3, ts, "timestamp in event must match ledger at withdrawal time");
+}
+
+/// Two withdrawals at different timestamps produce different timestamp fields.
+/// (Replay detection: same creator + payout but different timestamp = distinct event.)
+#[test]
+fn test_withdrawn_event_timestamp_changes_between_calls() {
+    use soroban_sdk::TryFromVal;
+
+    // First campaign
+    let (env1, client1, _creator1, _token1) = setup_no_nft(1_000);
+    let ts1 = env1.ledger().timestamp();
+    client1.withdraw();
+    let data1 =
+        first_event_data(&env1, "campaign", "withdrawn").expect("withdrawn event not found");
+    let tuple1: (Address, i128, u32, u64) =
+        <(Address, i128, u32, u64)>::try_from_val(&env1, &data1).unwrap();
+
+    // Second campaign at a later timestamp
+    let (env2, client2, _creator2, _token2) = setup_no_nft(1_000);
+    env2.ledger().set_timestamp(ts1 + 100);
+    client2.withdraw();
+    let data2 =
+        first_event_data(&env2, "campaign", "withdrawn").expect("withdrawn event not found");
+    let tuple2: (Address, i128, u32, u64) =
+        <(Address, i128, u32, u64)>::try_from_val(&env2, &data2).unwrap();
+
+    assert_ne!(tuple1.3, tuple2.3, "timestamps must differ between withdrawals");
+}
+
+// ── Security: emit helper — fee_bps boundary ─────────────────────────────────
+
+/// `emit_fee_transferred` panics when fee_bps exceeds MAX_FEE_BPS.
+#[test]
+#[should_panic(expected = "fee_transferred: fee_bps exceeds MAX_FEE_BPS")]
+fn test_emit_fee_transferred_panics_on_fee_bps_above_max() {
+    use crate::withdraw_event_emission::MAX_FEE_BPS;
+    let env = Env::default();
+    let addr = Address::generate(&env);
+    emit_fee_transferred(&env, &addr, 100, MAX_FEE_BPS + 1);
+}
+
+/// `emit_fee_transferred` accepts fee_bps == MAX_FEE_BPS (boundary).
+#[test]
+fn test_emit_fee_transferred_accepts_max_fee_bps_boundary() {
+    use crate::withdraw_event_emission::MAX_FEE_BPS;
+    let env = Env::default();
+    let addr = Address::generate(&env);
+    emit_fee_transferred(&env, &addr, 1_000, MAX_FEE_BPS);
+}

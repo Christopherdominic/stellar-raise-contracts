@@ -27,8 +27,8 @@ mod tests {
 
     // Pull in the contract functions directly (same crate)
     use npm_package_lock::{
-        audit_all, audit_all_bounded, audit_package, failing_results, is_version_gte,
-        parse_semver, validate_integrity, validate_lockfile_version, PackageEntry, MAX_PACKAGES,
+        audit_all, audit_package, failing_results, is_version_gte, parse_semver,
+        validate_integrity, validate_lockfile_version, PackageEntry,
     };
 
     // -----------------------------------------------------------------------
