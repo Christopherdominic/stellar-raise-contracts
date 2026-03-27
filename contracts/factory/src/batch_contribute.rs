@@ -39,7 +39,7 @@
 
 #![allow(dead_code)]
 
-use soroban_sdk::{Address, Env, Symbol, Vec};
+use soroban_sdk::{Address, Env, IntoVal, Symbol, Vec};
 
 /// Maximum number of campaigns that can be funded in a single batch call.
 /// Keeps worst-case gas predictable and prevents oversized-array attacks.
@@ -96,20 +96,13 @@ pub fn batch_contribute(env: &Env, contributor: &Address, entries: Vec<Contribut
         let _: () = env.invoke_contract(
             &entry.campaign,
             &Symbol::new(env, "contribute"),
-            soroban_sdk::vec![
-                env,
-                contributor.clone().into(),
-                entry.amount.into(),
-            ],
+            soroban_sdk::vec![env, contributor.clone().into_val(env), entry.amount.into_val(env),],
         );
     }
 
     // Emit a single summary event — cheaper than one event per campaign.
     env.events().publish(
-        (
-            Symbol::new(env, "batch"),
-            Symbol::new(env, "contributed"),
-        ),
+        (Symbol::new(env, "batch"), Symbol::new(env, "contributed")),
         (contributor.clone(), len),
     );
 }

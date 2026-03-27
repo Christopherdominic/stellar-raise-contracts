@@ -1,37 +1,47 @@
-//! Stellar Token Minter Contract
+//! # Stellar Token Minter Contract
 //!
-//! This contract provides NFT minting capabilities for the crowdfunding platform.
-//! It implements a secure minting mechanism that can be called by authorized
-//! contracts (like the Crowdfund contract) to reward contributors with NFTs.
+//! @title   StellarTokenMinter
+//! @notice  NFT minting contract for the Stellar Raise crowdfunding platform.
+//!          Authorized contracts (e.g. the Crowdfund contract) call `mint` to
+//!          issue on-chain reward NFTs to campaign contributors.
+//! @dev     Implements the Checks-Effects-Interactions pattern throughout.
+//!          All state-changing functions enforce `require_auth` before any
+//!          storage writes or event emissions.
 //!
 //! ## Security Model
 //!
-//! - **Authorization**: Only the designated minter can call `mint` (enforced via `require_auth`).
-//! - **Admin Separation**: Admin role is separate from minter role for principle of least privilege.
-//! - **State Management**: Uses persistent storage for token ID tracking and metadata.
-//! - **Bounded Operations**: Ensures all operations are within Soroban resource limits.
-//! - **Idempotency**: Prevents duplicate token minting via token ID uniqueness check.
-//! - **Initialization Guard**: Contract can only be initialized once.
+//! - **Authorization**: Only the designated minter can call `mint`
+//!   (enforced via `require_auth` on the stored minter address).
+//! - **Admin Separation**: Admin role is separate from minter role
+//!   (principle of least privilege — admin cannot mint directly).
+//! - **State Management**: Persistent storage is used for token metadata;
+//!   instance storage is used for roles and the counter.
+//! - **Bounded Operations**: All operations stay within Soroban resource limits.
+//! - **Idempotency**: Duplicate token minting is rejected via a persistent-storage
+//!   existence check before any write.
+//! - **Initialization Guard**: Contract can only be initialized once; a second
+//!   call panics with "already initialized".
 //!
 //! ## Deprecated Patterns (v1.0)
 //!
-//! The following patterns have been deprecated in favor of more secure implementations:
-//! - Direct admin minting (now requires minter role)
+//! The following patterns have been deprecated in favour of more secure implementations:
+//! - Direct admin minting (now requires the dedicated minter role)
 //! - Unguarded initialization (now panics on double-init)
 //! - Implicit authorization (now explicit via `require_auth`)
 //!
 //! ## Invariants
 //!
-//! 1. `total_minted` equals the count of unique token IDs that have been minted
-//! 2. Each token ID can only be minted once (enforced by persistent storage check)
-//! 3. Only the designated minter can call `mint` (enforced by `require_auth`)
-//! 4. Admin can update the minter address (admin-only operation)
-//! 5. Contract state is immutable after initialization (no re-initialization)
+//! 1. `total_minted` equals the count of unique token IDs that have been minted.
+//! 2. Each token ID can only be minted once (persistent storage existence check).
+//! 3. Only the designated minter can call `mint` (`require_auth` enforced).
+//! 4. Only the admin can update the minter address (`require_auth` enforced).
+//! 5. Contract state is immutable after initialization (no re-initialization).
 
-#![no_std]
+// stellar_token_minter — NFT minting capabilities for the crowdfunding platform.
 
-// ── Test constants ────────────────────────────────────────────────────────────
-//
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
+
+// ── Test constants ────────────────────────────────────────────────────────────//
 // Centralised numeric literals used across the stellar_token_minter test suites.
 // Defining them here means CI/CD only needs to update one location when campaign
 // parameters change, and test intent is self-documenting.
@@ -98,6 +108,65 @@ pub const TEST_PARTIAL_CONTRIBUTION_A: i128 = 300_000;
 
 /// Second contribution amount used in the "partial accumulation" test.
 pub const TEST_PARTIAL_CONTRIBUTION_B: i128 = 200_000;
+
+// ── Event / mint budget helpers ───────────────────────────────────────────────
+
+/// Maximum events allowed per Soroban transaction.
+pub const MAX_EVENTS_PER_TX: u32 = 100;
+
+/// Maximum NFTs minted in a single `withdraw()` call.
+pub const MAX_MINT_BATCH: u32 = 50;
+
+/// Maximum log entries per transaction.
+pub const MAX_LOG_ENTRIES: u32 = 64;
+
+/// Returns `true` if `emitted` is below `MAX_EVENTS_PER_TX`.
+#[inline]
+pub fn within_event_budget(emitted: u32) -> bool {
+    emitted < MAX_EVENTS_PER_TX
+}
+
+/// Returns `true` if `minted` is below `MAX_MINT_BATCH`.
+#[inline]
+pub fn within_mint_batch(minted: u32) -> bool {
+    minted < MAX_MINT_BATCH
+}
+
+/// Returns `true` if `logged` is below `MAX_LOG_ENTRIES`.
+#[inline]
+pub fn within_log_budget(logged: u32) -> bool {
+    logged < MAX_LOG_ENTRIES
+}
+
+/// Returns remaining event budget (saturates at 0).
+#[inline]
+pub fn remaining_event_budget(reserved: u32) -> u32 {
+    MAX_EVENTS_PER_TX.saturating_sub(reserved)
+}
+
+/// Returns remaining mint budget (saturates at 0).
+#[inline]
+pub fn remaining_mint_budget(minted: u32) -> u32 {
+    MAX_MINT_BATCH.saturating_sub(minted)
+}
+
+/// Emits a batch summary event if `count > 0` and budget is not exhausted.
+/// Returns `true` if the event was emitted.
+pub fn emit_batch_summary(
+    env: &Env,
+    topic: (&str, &str),
+    count: u32,
+    emitted_so_far: u32,
+) -> bool {
+    if count == 0 || !within_event_budget(emitted_so_far) {
+        return false;
+    }
+    env.events().publish(
+        (Symbol::new(env, topic.0), Symbol::new(env, topic.1)),
+        count,
+    );
+    true
+}
 
 // ── Constants ────────────────────────────────────────────────────────────────
 

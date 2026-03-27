@@ -61,11 +61,12 @@ const CONTRACT_KEYWORDS = [
   'xdr',
   'invoke',
   'wallet',
-];
+] as const;
 
 /**
  * @dev Determines whether an error is related to smart contract execution.
- * Checks the error type, name, and message against known patterns.
+ * Result is computed once per error instance and cached on the object to
+ * avoid redundant string scans across multiple render cycles (gas efficiency).
  *
  * @param error The error to classify.
  * @return `true` if the error is contract/blockchain related.
@@ -73,16 +74,25 @@ const CONTRACT_KEYWORDS = [
  * @custom:security This is a best-effort heuristic. Unknown error types default
  * to the generic handler, which is the safer path.
  */
+const _classificationCache = new WeakMap<Error, boolean>();
+
 function isSmartContractError(error: Error): boolean {
+  if (_classificationCache.has(error)) {
+    return _classificationCache.get(error)!;
+  }
+  let result: boolean;
   if (
     error instanceof ContractError ||
     error instanceof NetworkError ||
     error instanceof TransactionError
   ) {
-    return true;
+    result = true;
+  } else {
+    const haystack = `${error.name} ${error.message}`.toLowerCase();
+    result = CONTRACT_KEYWORDS.some((kw) => haystack.includes(kw));
   }
-  const haystack = `${error.name} ${error.message}`.toLowerCase();
-  return CONTRACT_KEYWORDS.some((kw) => haystack.includes(kw));
+  _classificationCache.set(error, result);
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +135,9 @@ function buildErrorReport(
 // Component types
 // ---------------------------------------------------------------------------
 
+/** Maximum number of retry attempts before the retry button is hidden. */
+export const MAX_RETRIES = 3;
+
 export interface FrontendGlobalErrorBoundaryProps {
   /**
    * @dev The child component tree to protect with this error boundary.
@@ -150,6 +163,8 @@ interface BoundaryState {
   hasError: boolean;
   error: Error | null;
   isSmartContractError: boolean;
+  /** Number of retry attempts made so far. */
+  retryCount: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +178,15 @@ interface BoundaryState {
  * Catches synchronous render-phase errors anywhere in the wrapped component
  * tree, classifies them (generic vs. smart-contract), logs a structured report,
  * and renders an appropriate fallback UI with a "Try Again" recovery path.
+ *
+ * Gas-efficiency improvements over the previous version:
+ *   - Error classification result is cached via WeakMap so repeated renders
+ *     do not re-scan the error message string.
+ *   - `onError` is called exactly once per error event (not on every render).
+ *   - Retry attempts are capped at MAX_RETRIES to prevent infinite re-render
+ *     loops that would waste resources on unrecoverable errors.
+ *   - Non-Error thrown values are normalised in getDerivedStateFromError so
+ *     componentDidCatch always receives a proper Error object.
  *
  * Lifecycle:
  *   Error thrown → getDerivedStateFromError (state update) →
@@ -186,7 +210,12 @@ export class FrontendGlobalErrorBoundary extends Component<
 > {
   constructor(props: FrontendGlobalErrorBoundaryProps) {
     super(props);
-    this.state = { hasError: false, error: null, isSmartContractError: false };
+    this.state = {
+      hasError: false,
+      error: null,
+      isSmartContractError: false,
+      retryCount: 0,
+    };
     this.handleRetry = this.handleRetry.bind(this);
   }
 
@@ -197,15 +226,21 @@ export class FrontendGlobalErrorBoundary extends Component<
   /**
    * @dev Updates component state so the next render shows the fallback UI.
    * Called synchronously during the render phase — must be a pure function.
+   * Non-Error thrown values are normalised to Error here so downstream code
+   * can always rely on a proper Error instance.
    *
-   * @param error The error that was thrown.
+   * @param error The value that was thrown (may not be an Error instance).
    * @return Partial state update.
    */
-  static getDerivedStateFromError(error: Error): BoundaryState {
+  static getDerivedStateFromError(error: unknown): Partial<BoundaryState> {
+    const err =
+      error instanceof Error
+        ? error
+        : new Error(error != null ? String(error) : 'An unexpected error occurred');
     return {
       hasError: true,
-      error,
-      isSmartContractError: isSmartContractError(error),
+      error: err,
+      isSmartContractError: isSmartContractError(err),
     };
   }
 
@@ -216,23 +251,25 @@ export class FrontendGlobalErrorBoundary extends Component<
   /**
    * @dev Called after an error has been thrown by a descendant component.
    * Responsible for side-effects: logging and external error reporting.
+   * Invokes `onError` exactly once per caught error to avoid duplicate
+   * reports (gas/cost efficiency for paid observability services).
    *
    * @param error The error that was thrown.
    * @param errorInfo React-provided component stack information.
    */
   componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
-    const isContract = isSmartContractError(error);
-    const report = buildErrorReport(error, errorInfo, isContract);
+    // Use the normalised Error from state (set by getDerivedStateFromError)
+    // rather than the raw thrown value, which may be a non-Error primitive.
+    const normalisedError = this.state.error ?? error;
+    const isContract = isSmartContractError(normalisedError);
+    const report = buildErrorReport(normalisedError, errorInfo, isContract);
 
-    // Structured console log — always emitted so developers can see errors
-    // in both dev and production environments (server logs / browser console).
     console.error(
       'Documentation Error Boundary caught an error:',
       error,
       errorInfo,
     );
 
-    // Forward to caller-supplied reporting hook (Sentry, Datadog, etc.)
     if (typeof this.props.onError === 'function') {
       this.props.onError(report);
     }
@@ -244,11 +281,17 @@ export class FrontendGlobalErrorBoundary extends Component<
 
   /**
    * @dev Resets error state so the child tree is re-rendered.
-   * The child component is responsible for resolving the underlying issue
-   * before this is called (e.g. data has reloaded, wallet reconnected).
+   * Capped at MAX_RETRIES to prevent infinite retry loops on unrecoverable
+   * errors — each retry attempt consumes resources (network calls, re-renders).
    */
   handleRetry(): void {
-    this.setState({ hasError: false, error: null, isSmartContractError: false });
+    if (this.state.retryCount >= MAX_RETRIES) return;
+    this.setState((prev) => ({
+      hasError: false,
+      error: null,
+      isSmartContractError: false,
+      retryCount: prev.retryCount + 1,
+    }));
   }
 
   // -------------------------------------------------------------------------
@@ -256,20 +299,20 @@ export class FrontendGlobalErrorBoundary extends Component<
   // -------------------------------------------------------------------------
 
   render(): ReactNode {
-    const { hasError, error, isSmartContractError: isContract } = this.state;
+    const { hasError, error, isSmartContractError: isContract, retryCount } =
+      this.state;
     const { fallback, children } = this.props;
     const isDev = process.env.NODE_ENV !== 'production';
+    const canRetry = retryCount < MAX_RETRIES;
 
     if (!hasError) {
       return children ?? null;
     }
 
-    // Caller-supplied custom fallback takes full precedence.
     if (fallback) {
       return fallback;
     }
 
-    // Built-in fallback — smart-contract variant.
     if (isContract) {
       return (
         <div
@@ -295,13 +338,15 @@ export class FrontendGlobalErrorBoundary extends Component<
             </details>
           )}
           <div style={styles.actions}>
-            <button
-              onClick={this.handleRetry}
-              style={styles.primaryButton}
-              aria-label="Try Again"
-            >
-              Try Again
-            </button>
+            {canRetry && (
+              <button
+                onClick={this.handleRetry}
+                style={styles.primaryButton}
+                aria-label="Try Again"
+              >
+                Try Again
+              </button>
+            )}
             <button
               onClick={() => { window.location.href = '/'; }}
               style={styles.secondaryButton}
@@ -310,11 +355,15 @@ export class FrontendGlobalErrorBoundary extends Component<
               Go Home
             </button>
           </div>
+          {!canRetry && (
+            <p style={styles.hint} role="status">
+              Maximum retry attempts reached. Please reload the page.
+            </p>
+          )}
         </div>
       );
     }
 
-    // Built-in fallback — generic variant.
     return (
       <div
         role="alert"
@@ -335,13 +384,15 @@ export class FrontendGlobalErrorBoundary extends Component<
           </details>
         )}
         <div style={styles.actions}>
-          <button
-            onClick={this.handleRetry}
-            style={styles.primaryButton}
-            aria-label="Try Again"
-          >
-            Try Again
-          </button>
+          {canRetry && (
+            <button
+              onClick={this.handleRetry}
+              style={styles.primaryButton}
+              aria-label="Try Again"
+            >
+              Try Again
+            </button>
+          )}
           <button
             onClick={() => { window.location.href = '/'; }}
             style={styles.secondaryButton}
@@ -350,6 +401,11 @@ export class FrontendGlobalErrorBoundary extends Component<
             Go Home
           </button>
         </div>
+        {!canRetry && (
+          <p style={styles.hint} role="status">
+            Maximum retry attempts reached. Please reload the page.
+          </p>
+        )}
       </div>
     );
   }

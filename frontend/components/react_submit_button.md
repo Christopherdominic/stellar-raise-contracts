@@ -1,20 +1,20 @@
 # ReactSubmitButton
 
-A typed React submit button with a strict state machine, safe label handling,
-double-submit prevention, and ARIA accessibility — designed for Stellar/Soroban
-transaction flows.
+A typed React submit button with a strict state machine, safe label handling, double-submit prevention, and ARIA accessibility semantics.
+
+---
 
 ## States
 
-| State        | Description                                              | Interaction |
-| :----------- | :------------------------------------------------------- | :---------- |
-| `idle`       | Default; ready to submit                                 | Clickable   |
-| `submitting` | Transaction in-flight; blocks duplicate submissions      | Blocked     |
-| `success`    | Transaction confirmed                                    | Blocked     |
-| `error`      | Transaction failed; user may retry                       | Clickable   |
-| `disabled`   | Externally disabled (deadline passed, goal met, etc.)    | Blocked     |
+| State        | Description                                      | Clickable |
+|--------------|--------------------------------------------------|-----------|
+| `idle`       | Default — ready to submit                        | ✅        |
+| `submitting` | Async action in-flight; blocks interaction       | ❌        |
+| `success`    | Action confirmed                                 | ✅        |
+| `error`      | Action failed; user can retry                    | ✅        |
+| `disabled`   | Externally locked (deadline passed, goal met…)   | ❌        |
 
-### Allowed Transitions
+### Allowed transitions
 
 ```
 idle        → submitting | disabled
@@ -24,21 +24,37 @@ error       → idle | submitting | disabled
 disabled    → idle
 ```
 
-Invalid transitions in strict mode fall back to `previousState`.
+Same-state updates are always allowed (idempotent).
+
+---
 
 ## Props
 
-| Prop                | Type                        | Default      | Description                                      |
-| :------------------ | :-------------------------- | :----------- | :----------------------------------------------- |
-| `state`             | `SubmitButtonState`         | —            | Current button state (required)                  |
-| `previousState`     | `SubmitButtonState`         | `undefined`  | Used for strict transition validation             |
-| `strictTransitions` | `boolean`                   | `true`       | Enforce the allowed-transition map                |
-| `labels`            | `SubmitButtonLabels`        | `undefined`  | Per-state label overrides                         |
-| `onClick`           | `(e) => void \| Promise`    | `undefined`  | Async-safe handler; blocked while submitting      |
-| `type`              | `"button" \| "submit" \| "reset"` | `"button"` | HTML button type                           |
-| `disabled`          | `boolean`                   | `undefined`  | External disabled override                        |
-| `className`         | `string`                    | `undefined`  | Additional CSS class                              |
-| `id`                | `string`                    | `undefined`  | HTML id attribute                                 |
+| Prop                | Type                                              | Default      | Description                                              |
+|---------------------|---------------------------------------------------|--------------|----------------------------------------------------------|
+| `state`             | `SubmitButtonState`                               | —            | Current button state (required)                          |
+| `previousState`     | `SubmitButtonState`                               | `undefined`  | Previous state for strict transition validation          |
+| `strictTransitions` | `boolean`                                         | `true`       | Falls back to `previousState` on invalid transitions     |
+| `labels`            | `SubmitButtonLabels`                              | `undefined`  | Per-state label overrides                                |
+| `onClick`           | `(e: MouseEvent) => void \| Promise<void>`        | `undefined`  | Click handler; blocked while submitting/disabled         |
+| `className`         | `string`                                          | `undefined`  | Additional CSS class                                     |
+| `id`                | `string`                                          | `undefined`  | HTML `id` attribute                                      |
+| `type`              | `"button" \| "submit" \| "reset"`                 | `"button"`   | HTML button type                                         |
+| `disabled`          | `boolean`                                         | `undefined`  | External disabled override                               |
+
+---
+
+## Default labels
+
+| State        | Label             |
+|--------------|-------------------|
+| `idle`       | `Submit`          |
+| `submitting` | `Submitting...`   |
+| `success`    | `Submitted`       |
+| `error`      | `Try Again`       |
+| `disabled`   | `Submit Disabled` |
+
+---
 
 ## Usage
 
@@ -46,68 +62,69 @@ Invalid transitions in strict mode fall back to `previousState`.
 import ReactSubmitButton from "./react_submit_button";
 
 // Basic
-<ReactSubmitButton state="idle" onClick={handleContribute} />
+<ReactSubmitButton state="idle" onClick={handleSubmit} />
 
-// With state machine enforcement
+// With custom labels
 <ReactSubmitButton
-  state={txState}          // e.g. "submitting"
-  previousState={prevState} // e.g. "idle"
-  strictTransitions
-  labels={{ idle: "Fund Campaign", submitting: "Funding…", success: "Funded!" }}
+  state={txState}
+  previousState={prevTxState}
+  labels={{ idle: "Fund Campaign", submitting: "Funding...", success: "Funded!" }}
   onClick={handleContribute}
 />
+
+// Externally disabled (e.g. campaign deadline passed)
+<ReactSubmitButton state="disabled" labels={{ disabled: "Campaign Ended" }} />
 ```
 
-## Exported Helpers
+---
 
-All pure helpers are exported for independent unit testing:
+## Exported helpers
 
-| Export                                  | Purpose                                              |
-| :-------------------------------------- | :--------------------------------------------------- |
-| `normalizeSubmitButtonLabel`            | Sanitize/truncate a label candidate                  |
-| `resolveSubmitButtonLabel`              | Pick the correct label for a given state             |
-| `isValidSubmitButtonStateTransition`    | Check if a state transition is allowed               |
-| `resolveSafeSubmitButtonState`          | Apply strict-mode fallback logic                     |
-| `isSubmitButtonInteractionBlocked`      | Determine if clicks should be suppressed             |
-| `isSubmitButtonBusy`                    | Determine if `aria-busy` should be `true`            |
-| `ALLOWED_TRANSITIONS`                   | The canonical transition map (shared with tests)     |
+All pure functions are exported for independent unit testing.
 
-## Security Assumptions
+| Function                              | Purpose                                                        |
+|---------------------------------------|----------------------------------------------------------------|
+| `normalizeSubmitButtonLabel`          | Sanitizes a label: strips control chars, truncates to 80 chars |
+| `resolveSubmitButtonLabel`            | Returns the safe label for a given state                       |
+| `isValidSubmitButtonStateTransition`  | Validates a `from → to` state transition                       |
+| `resolveSafeSubmitButtonState`        | Enforces strict transitions, falls back to `previousState`     |
+| `isSubmitButtonInteractionBlocked`    | Returns `true` when clicks must be suppressed                  |
+| `isSubmitButtonBusy`                  | Returns `true` when `aria-busy` should be set                  |
+| `ALLOWED_TRANSITIONS`                 | Transition map (shared by component and tests)                 |
+
+---
+
+## Security assumptions
 
 - **No `dangerouslySetInnerHTML`** — labels are rendered as React text nodes only.
-- **Label sanitization** — control characters are stripped; labels are truncated at
-  80 characters to prevent layout abuse.
-- **Double-submit prevention** — the component maintains a local `isLocallySubmitting`
-  flag that blocks re-entry while an async `onClick` is in-flight, preventing
-  duplicate Stellar transactions.
-- **Hardcoded styles** — all colours are compile-time constants; no user input
-  reaches CSS properties.
-- **Caller responsibility** — input validation (amounts, addresses) must be
-  performed by the parent before calling `onClick`.
+- **Label sanitization** — control characters (`U+0000–U+001F`, `U+007F`) are stripped; labels are truncated to 80 characters to prevent layout abuse.
+- **Double-submit prevention** — an internal `isLocallySubmitting` flag blocks re-entry while an async `onClick` is in-flight, preventing duplicate blockchain transactions.
+- **Hardcoded styles** — all CSS values are compile-time constants; no dynamic style injection from user input.
+- **Input validation is the caller's responsibility** — the component surfaces state only; it never submits data itself.
 
-## Testing
+---
 
-```bash
-# Run the full test suite
-npm test -- --testPathPattern=react_submit_button
+## Accessibility
 
-# With coverage
-npm run test:coverage -- --testPathPattern=react_submit_button
+- `aria-live="polite"` — state label changes are announced to screen readers.
+- `aria-busy` — set to `true` while submitting.
+- `aria-label` — always set to the resolved, sanitized label.
+- `disabled` — set on the HTML element when interaction is blocked, preventing keyboard activation.
+
+---
+
+## Tests
+
+```
+frontend/components/react_submit_button.test.tsx
 ```
 
-Coverage target: ≥ 95% (branches, lines, functions, statements).
-
-The test suite covers:
-
-- `normalizeSubmitButtonLabel` — non-string inputs, empty/whitespace, control
-  characters, 80-char boundary, truncation, XSS-like strings
-- `resolveSubmitButtonLabel` — all five states, custom overrides, fallback logic
-- `isValidSubmitButtonStateTransition` — every allowed edge, every blocked edge,
-  same-state idempotency
-- `resolveSafeSubmitButtonState` — strict/non-strict modes, missing previousState
-- `isSubmitButtonInteractionBlocked` — all blocking conditions
-- `isSubmitButtonBusy` — submitting state, local flag
-- Component rendering — all states, props, ARIA attributes
-- Click handling — idle/error fire, submitting/disabled/success block,
-  async handler, rejected promise, no-onClick guard
-- Strict transition enforcement — invalid fallback, valid pass-through, non-strict
+51 tests covering:
+- Label normalization and sanitization edge cases
+- Default and custom label resolution per state
+- State transition validation (allowed, blocked, idempotent)
+- Strict transition enforcement and fallback
+- Interaction blocking (submitting, disabled, external flag, local in-flight)
+- `aria-busy` / `aria-live` / `aria-label` attributes
+- Click handler: idle, error (retry), blocked states, async, rejected promise
+- Rendering: element type, `data-state`, `type`, `className`, `id`
