@@ -1,0 +1,49 @@
+name: Security Compliance
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    name: Security Compliance Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "v1-security"
+          shared-key: "crowdfund"
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Install wasm-opt (Binaryen)
+        run: sudo apt-get install -y binaryen
+
+      - name: Make validation script executable
+        run: chmod +x scripts/security_compliance_validation.sh scripts/security_compliance_validation.test.sh
+
+      - name: Run security compliance validation
+        # Exit code 1 = check failed → blocks the PR.
+        # Exit code 2 = tooling missing → blocks the PR.
+        run: ./scripts/security_compliance_validation.sh
+
+      - name: Run validation test suite
+        run: ./scripts/security_compliance_validation.test.sh

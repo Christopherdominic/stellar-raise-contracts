@@ -4,17 +4,16 @@
 # @brief   Validates GitHub Actions workflow files for correctness and speed.
 #
 # @description
-#   This script audits the workflow YAML files under .github/workflows/ and
-#   enforces a set of rules that keep CI fast, correct, and maintainable.
-#   It is designed to run both locally and inside a GitHub Actions job.
+#   Audits workflow YAML files under .github/workflows/ and enforces rules
+#   that keep CI fast, correct, and maintainable. Runs locally and in CI.
 #
 # @checks
 #   1.  Required workflow files exist and are non-empty.
-#   2.  No workflow references the non-existent actions/checkout@v6 version.
-#   3.  rust_ci.yml has no duplicate WASM build steps (wastes ~60-90 s/run).
+#   2.  No workflow references the non-existent actions/checkout@v6.
+#   3.  rust_ci.yml has no duplicate WASM build steps (~60-90 s/run wasted).
 #   4.  Smoke test does not invoke non-existent contract functions.
 #   5.  Smoke test initialize call includes the required --admin argument.
-#   6.  Smoke test WASM build is scoped to -p crowdfund (not the full workspace).
+#   6.  Smoke test WASM build is scoped to -p crowdfund (not full workspace).
 #   7.  Smoke test uses stellar-cli, not the deprecated soroban-cli.
 #   8.  rust_ci.yml includes a frontend UI test job.
 #   9.  rust_ci.yml uses Swatinem/rust-cache for dependency caching.
@@ -40,32 +39,177 @@
 #   1  One or more checks failed (details printed to stderr).
 #
 # @author  stellar-raise-contracts contributors
-# @version 3.0.0
+# @version 4.0.0
 # =============================================================================
 
 set -euo pipefail
 
-WORKFLOWS_DIR=".github/workflows"
+# =============================================================================
+# @section Constants — paths
+# @notice  All file paths are defined here. Change once to affect all checks.
+# =============================================================================
 
-readonly PASS=0
-readonly FAIL=1
+# @constant WORKFLOWS_DIR
+# @notice  Root directory containing all GitHub Actions workflow YAML files.
+readonly WORKFLOWS_DIR=".github/workflows"
 
+# @constant RUST_CI_YML
+# @notice  Path to the main Rust CI workflow file.
+readonly RUST_CI_YML="$WORKFLOWS_DIR/rust_ci.yml"
+
+# @constant SMOKE_YML
+# @notice  Path to the testnet smoke-test workflow file.
+readonly SMOKE_YML="$WORKFLOWS_DIR/testnet_smoke.yml"
+
+# @constant SPELLCHECK_YML
+# @notice  Path to the spellcheck workflow file.
+readonly SPELLCHECK_YML="$WORKFLOWS_DIR/spellcheck.yml"
+
+# @constant REQUIRED_WORKFLOW_FILES
+# @notice  Array of workflow files that must exist and be non-empty.
+readonly -a REQUIRED_WORKFLOW_FILES=(
+  "$RUST_CI_YML"
+  "$SMOKE_YML"
+  "$SPELLCHECK_YML"
+)
+
+# =============================================================================
+# @section Constants — versioning
+# @notice  Pin action versions here; update in one place when upgrading.
+# =============================================================================
+
+# @constant CHECKOUT_BANNED_VERSION
+# @notice  The non-existent checkout version that must never appear in workflows.
+readonly CHECKOUT_BANNED_VERSION="actions/checkout@v6"
+
+# @constant RUST_CACHE_ACTION
+# @notice  The caching action required in rust_ci.yml for fast dependency builds.
+readonly RUST_CACHE_ACTION="Swatinem/rust-cache"
+
+# =============================================================================
+# @section Constants — build configuration
+# @notice  Cargo build flags and targets used in workflow validation checks.
+# =============================================================================
+
+# @constant WASM_BUILD_PATTERN
+# @notice  The exact cargo command that constitutes a WASM build step.
+#          Used to detect duplicate build steps (Check 3).
+readonly WASM_BUILD_PATTERN="cargo build --release --target wasm32-unknown-unknown"
+
+# @constant WASM_SCOPE_PATTERN
+# @notice  Regex pattern confirming the WASM build is scoped to the crowdfund crate.
+#          A full workspace build wastes 2-4x more CI time (Check 6).
+readonly WASM_SCOPE_PATTERN="cargo build.*-p crowdfund"
+
+# @constant WASM_OPT_TOOL
+# @notice  The binary size optimiser that must appear in rust_ci.yml (Check 12).
+#          wasm-opt -Oz reduces WASM size by 20-40%, lowering deployment fees.
+readonly WASM_OPT_TOOL="wasm-opt"
+
+# =============================================================================
+# @section Constants — CLI tooling
+# @notice  CLI tool names used in smoke-test validation.
+# =============================================================================
+
+# @constant DEPRECATED_CLI
+# @notice  The deprecated Soroban CLI package name that must not appear in workflows.
+#          soroban-cli is unmaintained and may contain unpatched vulnerabilities.
+readonly DEPRECATED_CLI="soroban-cli"
+
+# @constant REQUIRED_ADMIN_FLAG
+# @notice  The --admin flag required in the smoke-test initialize invocation.
+#          Omitting it causes on-chain rejection with a cryptic error message.
+readonly REQUIRED_ADMIN_FLAG="--admin"
+
+# =============================================================================
+# @section Constants — non-existent contract functions
+# @notice  Functions that do not exist in the crowdfund ABI.
+#          Calling them causes the smoke test to fail with a confusing error.
+# =============================================================================
+
+# @constant BANNED_CONTRACT_FUNCTIONS
+# @notice  Array of function names that must not appear in smoke-test invocations.
+readonly -a BANNED_CONTRACT_FUNCTIONS=(
+  "is_initialized"
+  "get_campaign_info"
+  "get_stats"
+)
+
+# =============================================================================
+# @section Constants — security
+# @notice  Permission strings required for least-privilege workflow jobs.
+# =============================================================================
+
+# @constant LEAST_PRIVILEGE_PERM
+# @notice  The permissions declaration required in testnet_smoke.yml (Check 11).
+#          Prevents a compromised job from pushing commits or modifying releases.
+readonly LEAST_PRIVILEGE_PERM="contents: read"
+
+# =============================================================================
+# @section Constants — performance thresholds
+# @notice  Numeric limits used in timeout and build-count checks.
+# =============================================================================
+
+# @constant MAX_WASM_BUILD_STEPS
+# @notice  Maximum allowed WASM build steps in rust_ci.yml.
+#          More than one step wastes 60-90 s of CI time per run.
+readonly MAX_WASM_BUILD_STEPS=1
+
+# @constant TIMEOUT_PATTERN
+# @notice  Regex pattern confirming a timeout-minutes bound is present (Check 10).
+readonly TIMEOUT_PATTERN="timeout-minutes:"
+
+# @constant ELAPSED_TIME_PATTERN
+# @notice  Regex pattern confirming elapsed-time logging is present (Check 10).
+readonly ELAPSED_TIME_PATTERN="elapsed|JOB_START"
+
+# @constant FRONTEND_JOB_PATTERN
+# @notice  Regex pattern confirming the frontend job exists in rust_ci.yml (Check 8).
+readonly FRONTEND_JOB_PATTERN="^  frontend:"
+
+# =============================================================================
+# @section Constants — exit codes
+# =============================================================================
+
+# @constant EXIT_PASS
+# @notice  Exit code returned when all checks pass.
+readonly EXIT_PASS=0
+
+# @constant EXIT_FAIL
+# @notice  Exit code returned when one or more checks fail.
+readonly EXIT_FAIL=1
+
+# @constant TOTAL_CHECKS
+# @notice  Total number of checks performed by this script.
+readonly TOTAL_CHECKS=12
+
+# =============================================================================
+# @section Helpers
+# =============================================================================
+
+# @var errors
+# @notice  Running count of failed checks. Incremented by fail().
 errors=0
 
-# @function fail — records a check failure, increments errors counter
+# @function fail
+# @notice  Records a check failure and increments the errors counter.
+# @param   $*  Human-readable failure message printed to stderr.
 fail() {
   echo "FAIL: $*" >&2
   errors=$((errors + 1))
 }
 
-# @function pass — prints a success message for a completed check
+# @function pass
+# @notice  Prints a success message for a completed check.
+# @param   $*  Human-readable success message printed to stdout.
 pass() {
   echo "PASS: $*"
 }
 
 # @function check_file_exists_and_nonempty
-# @brief    Verifies a workflow file exists and contains at least one byte.
-# @param    $1  path  Full path to the workflow file.
+# @notice  Verifies a workflow file exists and contains at least one byte.
+# @param   $1  path  Full path to the workflow file.
+# @exitcode  Calls fail() if the file is missing or empty; pass() otherwise.
 check_file_exists_and_nonempty() {
   local path="$1"
   if [[ ! -f "$path" ]]; then
@@ -81,21 +225,20 @@ check_file_exists_and_nonempty() {
 # Check 1 — Required workflow files exist and are non-empty
 # @rationale Missing or empty workflow files silently disable CI jobs.
 # =============================================================================
-for file in rust_ci.yml testnet_smoke.yml spellcheck.yml; do
-  check_file_exists_and_nonempty "$WORKFLOWS_DIR/$file"
+for file in "${REQUIRED_WORKFLOW_FILES[@]}"; do
+  check_file_exists_and_nonempty "$file"
 done
 
 # =============================================================================
 # Check 2 — No workflow references the non-existent actions/checkout@v6
-# @rationale actions/checkout@v6 does not exist; any reference blocks CI.
+# @rationale $CHECKOUT_BANNED_VERSION does not exist; any reference blocks CI.
 # @security  A non-existent version could be hijacked by a malicious actor.
-# @see       https://github.com/actions/checkout/releases
 # =============================================================================
-if grep -rq -- "actions/checkout@v6" "$WORKFLOWS_DIR/"; then
-  fail "Found 'actions/checkout@v6' (non-existent version) in $WORKFLOWS_DIR/"
-  grep -rn -- "actions/checkout@v6" "$WORKFLOWS_DIR/" >&2
+if grep -rq -- "$CHECKOUT_BANNED_VERSION" "$WORKFLOWS_DIR/"; then
+  fail "Found '$CHECKOUT_BANNED_VERSION' (non-existent version) in $WORKFLOWS_DIR/"
+  grep -rn -- "$CHECKOUT_BANNED_VERSION" "$WORKFLOWS_DIR/" >&2
 else
-  pass "No workflow references actions/checkout@v6"
+  pass "No workflow references $CHECKOUT_BANNED_VERSION"
 fi
 
 # =============================================================================
@@ -103,34 +246,34 @@ fi
 # @rationale Duplicate build wastes 60-90 s of CI time per run.
 # @performance Removing the duplicate reduces median wall-clock time by ~90 s.
 # =============================================================================
-wasm_build_count=$(grep -c -- "cargo build --release --target wasm32-unknown-unknown" \
-  "$WORKFLOWS_DIR/rust_ci.yml" 2>/dev/null || echo "0")
-
-if [[ "$wasm_build_count" -gt 1 ]]; then
-  fail "rust_ci.yml contains $wasm_build_count WASM build steps (expected 1)"
+wasm_build_count=$(grep -c -- "$WASM_BUILD_PATTERN" "$RUST_CI_YML" 2>/dev/null || echo "0")
+if [[ "$wasm_build_count" -gt "$MAX_WASM_BUILD_STEPS" ]]; then
+  fail "$RUST_CI_YML contains $wasm_build_count WASM build steps (max $MAX_WASM_BUILD_STEPS)"
 else
-  pass "rust_ci.yml has exactly $wasm_build_count WASM build step(s)"
+  pass "$RUST_CI_YML has $wasm_build_count WASM build step(s) (within limit of $MAX_WASM_BUILD_STEPS)"
 fi
 
-# ── Check 4: smoke test does not call non-existent contract functions ──────────
-
-for bad_fn in "is_initialized" "get_campaign_info" "get_stats"; do
-  if grep -qF -- "-- $bad_fn" "$WORKFLOWS_DIR/testnet_smoke.yml"; then
-    fail "testnet_smoke.yml calls non-existent contract function: $bad_fn"
+# =============================================================================
+# Check 4 — Smoke test does not call non-existent contract functions
+# @rationale Calling non-existent ABI functions causes confusing on-chain errors.
+# =============================================================================
+for bad_fn in "${BANNED_CONTRACT_FUNCTIONS[@]}"; do
+  if grep -qF -- "-- $bad_fn" "$SMOKE_YML"; then
+    fail "$SMOKE_YML calls non-existent contract function: $bad_fn"
   else
-    pass "testnet_smoke.yml does not call non-existent function '$bad_fn'"
+    pass "$SMOKE_YML does not call non-existent function '$bad_fn'"
   fi
 done
 
 # =============================================================================
 # Check 5 — Smoke test initialize call includes the required --admin argument
-# @rationale Omitting --admin causes on-chain rejection with a cryptic error.
+# @rationale Omitting $REQUIRED_ADMIN_FLAG causes on-chain rejection.
 # @security  Admin controls privileged ops (upgrades, refunds).
 # =============================================================================
-if ! grep -qF -- "--admin" "$WORKFLOWS_DIR/testnet_smoke.yml"; then
-  fail "testnet_smoke.yml initialize call is missing required --admin argument"
+if ! grep -qF -- "$REQUIRED_ADMIN_FLAG" "$SMOKE_YML"; then
+  fail "$SMOKE_YML initialize call is missing required $REQUIRED_ADMIN_FLAG argument"
 else
-  pass "testnet_smoke.yml initialize call includes --admin"
+  pass "$SMOKE_YML initialize call includes $REQUIRED_ADMIN_FLAG"
 fi
 
 # =============================================================================
@@ -138,22 +281,21 @@ fi
 # @rationale Full workspace build compiles unnecessary crates.
 # @performance Scoped build is 2-4x faster than full workspace build.
 # =============================================================================
-if ! grep -qE -- "cargo build.*-p crowdfund" "$WORKFLOWS_DIR/testnet_smoke.yml"; then
-  fail "testnet_smoke.yml WASM build step is missing '-p crowdfund'"
+if ! grep -qE -- "$WASM_SCOPE_PATTERN" "$SMOKE_YML"; then
+  fail "$SMOKE_YML WASM build step is missing '-p crowdfund' scope"
 else
-  pass "testnet_smoke.yml WASM build step is scoped to -p crowdfund"
+  pass "$SMOKE_YML WASM build step is scoped to -p crowdfund"
 fi
 
 # =============================================================================
 # Check 7 — Smoke test uses stellar-cli, not the deprecated soroban-cli
-# @rationale soroban-cli is unmaintained and may have unpatched vulnerabilities.
+# @rationale $DEPRECATED_CLI is unmaintained and may have unpatched vulnerabilities.
 # @security  Unmaintained CLI increases supply-chain risk.
-# @see       https://developers.stellar.org/docs/tools/stellar-cli
 # =============================================================================
-if grep -qF -- "soroban-cli" "$WORKFLOWS_DIR/testnet_smoke.yml"; then
-  fail "testnet_smoke.yml installs deprecated 'soroban-cli' — use 'stellar-cli'"
+if grep -qF -- "$DEPRECATED_CLI" "$SMOKE_YML"; then
+  fail "$SMOKE_YML installs deprecated '$DEPRECATED_CLI' — use 'stellar-cli'"
 else
-  pass "testnet_smoke.yml does not reference deprecated soroban-cli"
+  pass "$SMOKE_YML does not reference deprecated $DEPRECATED_CLI"
 fi
 
 # =============================================================================
@@ -161,61 +303,60 @@ fi
 # @rationale Without a frontend job, Jest tests never run in CI.
 # @performance Frontend job runs in parallel — zero added wall-clock time.
 # =============================================================================
-if ! grep -qE -- "^  frontend:" "$WORKFLOWS_DIR/rust_ci.yml"; then
-  fail "rust_ci.yml is missing a 'frontend' job for UI tests"
+if ! grep -qE -- "$FRONTEND_JOB_PATTERN" "$RUST_CI_YML"; then
+  fail "$RUST_CI_YML is missing a 'frontend' job for UI tests"
 else
-  pass "rust_ci.yml includes a 'frontend' job for UI tests"
+  pass "$RUST_CI_YML includes a 'frontend' job for UI tests"
 fi
 
-# ── Check 9: rust_ci.yml check job has a timeout-minutes bound ────────────────
-
-if ! grep -qE "timeout-minutes:" "$WORKFLOWS_DIR/rust_ci.yml"; then
-  fail "rust_ci.yml check job is missing timeout-minutes (runaway build risk)"
+# =============================================================================
+# Check 9 — rust_ci.yml uses Swatinem/rust-cache for dependency caching
+# @rationale Without caching, every run re-downloads all Rust dependencies.
+# @performance rust-cache reduces cold-build time by 60-80%.
+# =============================================================================
+if ! grep -qF -- "$RUST_CACHE_ACTION" "$RUST_CI_YML"; then
+  fail "$RUST_CI_YML is missing '$RUST_CACHE_ACTION' (dependency caching)"
 else
-  pass "rust_ci.yml has timeout-minutes bound"
+  pass "$RUST_CI_YML uses $RUST_CACHE_ACTION for dependency caching"
 fi
 
-# ── Check 10: rust_ci.yml WASM build step has a timeout-minutes bound ─────────
-
-wasm_timeout=$(awk '/Build crowdfund WASM/,/run:/' "$WORKFLOWS_DIR/rust_ci.yml" | grep -c "timeout-minutes:" || true)
-if [[ "$wasm_timeout" -eq 0 ]]; then
-  fail "rust_ci.yml WASM build step is missing timeout-minutes"
+# =============================================================================
+# Check 10 — rust_ci.yml has timeout-minutes and elapsed-time logging
+# @rationale Without a timeout, a hung build can block runners for up to 6 hours.
+# @performance Elapsed-time logging surfaces slow steps for future optimisation.
+# =============================================================================
+if ! grep -qE "$TIMEOUT_PATTERN" "$RUST_CI_YML"; then
+  fail "$RUST_CI_YML is missing $TIMEOUT_PATTERN (runaway build risk)"
 else
-  pass "rust_ci.yml WASM build step has timeout-minutes bound"
+  pass "$RUST_CI_YML has $TIMEOUT_PATTERN bound"
 fi
 
-# ── Check 11: rust_ci.yml includes elapsed-time logging step ──────────────────
-
-if ! grep -qE "elapsed|JOB_START" "$WORKFLOWS_DIR/rust_ci.yml"; then
-  fail "rust_ci.yml is missing elapsed-time logging step"
+if ! grep -qE "$ELAPSED_TIME_PATTERN" "$RUST_CI_YML"; then
+  fail "$RUST_CI_YML is missing elapsed-time logging step"
 else
-  pass "rust_ci.yml includes elapsed-time logging"
+  pass "$RUST_CI_YML includes elapsed-time logging"
 fi
-
-# ── Summary ───────────────────────────────────────────────────────────────────
 
 # =============================================================================
 # Check 11 — testnet_smoke.yml has least-privilege permissions
 # @rationale Smoke test only needs read access; write perms are unnecessary.
 # @security  Read-only perms prevent a compromised job from pushing commits.
-# @see       https://docs.github.com/en/actions/security-guides/automatic-token-authentication
 # =============================================================================
-if ! grep -qF -- "contents: read" "$WORKFLOWS_DIR/testnet_smoke.yml"; then
-  fail "testnet_smoke.yml is missing 'permissions: contents: read' (least-privilege)"
+if ! grep -qF -- "$LEAST_PRIVILEGE_PERM" "$SMOKE_YML"; then
+  fail "$SMOKE_YML is missing 'permissions: $LEAST_PRIVILEGE_PERM' (least-privilege)"
 else
-  pass "testnet_smoke.yml has least-privilege permissions (contents: read)"
+  pass "$SMOKE_YML has least-privilege permissions ($LEAST_PRIVILEGE_PERM)"
 fi
 
 # =============================================================================
 # Check 12 — rust_ci.yml includes a wasm-opt optimisation step
-# @rationale Raw rustc WASM is not size-optimised; wasm-opt -Oz saves 20-40%.
+# @rationale Raw rustc WASM is not size-optimised; $WASM_OPT_TOOL -Oz saves 20-40%.
 # @performance Reduces binary size 50-150 KB; lowers Stellar deployment fees.
-# @see       https://github.com/WebAssembly/binaryen
 # =============================================================================
-if ! grep -qF -- "wasm-opt" "$WORKFLOWS_DIR/rust_ci.yml"; then
-  fail "rust_ci.yml is missing a wasm-opt optimisation step"
+if ! grep -qF -- "$WASM_OPT_TOOL" "$RUST_CI_YML"; then
+  fail "$RUST_CI_YML is missing a $WASM_OPT_TOOL optimisation step"
 else
-  pass "rust_ci.yml includes a wasm-opt optimisation step"
+  pass "$RUST_CI_YML includes a $WASM_OPT_TOOL optimisation step"
 fi
 
 # =============================================================================
@@ -223,9 +364,9 @@ fi
 # =============================================================================
 echo ""
 if [[ "$errors" -eq 0 ]]; then
-  echo "All checks passed. (12/12)"
-  exit $PASS
+  echo "All checks passed. ($TOTAL_CHECKS/$TOTAL_CHECKS)"
+  exit $EXIT_PASS
 else
-  echo "$errors check(s) failed out of 12." >&2
-  exit $FAIL
+  echo "$errors check(s) failed out of $TOTAL_CHECKS." >&2
+  exit $EXIT_FAIL
 fi

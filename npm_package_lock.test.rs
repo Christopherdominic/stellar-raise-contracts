@@ -398,3 +398,173 @@ mod tests {
         assert!(MAX_PACKAGES > 0);
     }
 }
+
+// ── New advisory tests (2026-03 update) ──────────────────────────────────────
+
+#[cfg(test)]
+mod advisory_update_tests {
+    use std::collections::HashMap;
+    use npm_package_lock::{
+        audit_all, audit_all_bounded, audit_package, default_min_safe_versions,
+        failing_results, AuditResult, PackageEntry, MAX_PACKAGES,
+    };
+
+    const VALID_HASH: &str =
+        "sha512-OoohrmuUlBs8B8o6MB2Aevn+pRIH9zDALSR+6hhqVfa6fRwG/Qw9VUMSMW9VNg2CFc/MTIfabtdOVl9ODIJjpw==";
+
+    fn make(name: &str, version: &str) -> PackageEntry {
+        PackageEntry {
+            name: name.to_string(),
+            version: version.to_string(),
+            integrity: VALID_HASH.to_string(),
+            dev: true,
+        }
+    }
+
+    // ── default_min_safe_versions ─────────────────────────────────────────
+
+    #[test]
+    fn test_default_map_contains_svgo() {
+        let m = default_min_safe_versions();
+        assert_eq!(m.get("svgo").map(|s| s.as_str()), Some("3.3.3"));
+    }
+
+    #[test]
+    fn test_default_map_contains_brace_expansion() {
+        let m = default_min_safe_versions();
+        assert_eq!(m.get("brace-expansion").map(|s| s.as_str()), Some("2.0.3"));
+    }
+
+    #[test]
+    fn test_default_map_contains_handlebars() {
+        let m = default_min_safe_versions();
+        assert_eq!(m.get("handlebars").map(|s| s.as_str()), Some("4.7.9"));
+    }
+
+    // ── GHSA-f886-m6hf-6m8v: brace-expansion ─────────────────────────────
+
+    /// brace-expansion 2.0.2 is in the vulnerable range (>=2.0.0 <2.0.3)
+    #[test]
+    fn test_brace_expansion_vulnerable_2_0_2_fails() {
+        let entry = make("brace-expansion", "2.0.2");
+        let result = audit_package(&entry, &default_min_safe_versions());
+        assert!(!result.passed);
+        assert!(result.issues.iter().any(|i| i.contains("2.0.2")));
+        assert!(result.issues.iter().any(|i| i.contains("2.0.3")));
+    }
+
+    /// brace-expansion 2.0.3 is the first patched v2 release
+    #[test]
+    fn test_brace_expansion_patched_2_0_3_passes() {
+        let entry = make("brace-expansion", "2.0.3");
+        let result = audit_package(&entry, &default_min_safe_versions());
+        assert!(result.passed);
+    }
+
+    /// brace-expansion 2.0.0 is the start of the v2 vulnerable range
+    #[test]
+    fn test_brace_expansion_vulnerable_2_0_0_fails() {
+        let entry = make("brace-expansion", "2.0.0");
+        let result = audit_package(&entry, &default_min_safe_versions());
+        assert!(!result.passed);
+    }
+
+    /// brace-expansion 2.1.0 is above the patched version
+    #[test]
+    fn test_brace_expansion_newer_2_1_0_passes() {
+        let entry = make("brace-expansion", "2.1.0");
+        let result = audit_package(&entry, &default_min_safe_versions());
+        assert!(result.passed);
+    }
+
+    // ── GHSA-xjpj-3mr7-gcpf: handlebars ──────────────────────────────────
+
+    /// handlebars 4.7.8 is the last vulnerable version
+    #[test]
+    fn test_handlebars_vulnerable_4_7_8_fails() {
+        let entry = make("handlebars", "4.7.8");
+        let result = audit_package(&entry, &default_min_safe_versions());
+        assert!(!result.passed);
+        assert!(result.issues.iter().any(|i| i.contains("4.7.8")));
+        assert!(result.issues.iter().any(|i| i.contains("4.7.9")));
+    }
+
+    /// handlebars 4.7.9 is the first patched release
+    #[test]
+    fn test_handlebars_patched_4_7_9_passes() {
+        let entry = make("handlebars", "4.7.9");
+        let result = audit_package(&entry, &default_min_safe_versions());
+        assert!(result.passed);
+    }
+
+    /// handlebars 4.0.0 is the start of the vulnerable range
+    #[test]
+    fn test_handlebars_vulnerable_4_0_0_fails() {
+        let entry = make("handlebars", "4.0.0");
+        let result = audit_package(&entry, &default_min_safe_versions());
+        assert!(!result.passed);
+    }
+
+    /// handlebars 5.0.0 (hypothetical future) passes
+    #[test]
+    fn test_handlebars_future_5_0_0_passes() {
+        let entry = make("handlebars", "5.0.0");
+        let result = audit_package(&entry, &default_min_safe_versions());
+        assert!(result.passed);
+    }
+
+    // ── audit_all_bounded ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_bounded_within_limit_ok() {
+        let pkgs = vec![make("svgo", "3.3.3")];
+        assert!(audit_all_bounded(&pkgs, &default_min_safe_versions()).is_ok());
+    }
+
+    #[test]
+    fn test_bounded_empty_ok() {
+        assert!(audit_all_bounded(&[], &default_min_safe_versions()).is_ok());
+    }
+
+    #[test]
+    fn test_bounded_exactly_at_limit_ok() {
+        let pkgs: Vec<_> = (0..MAX_PACKAGES)
+            .map(|i| make(&format!("pkg-{}", i), "1.0.0"))
+            .collect();
+        assert!(audit_all_bounded(&pkgs, &default_min_safe_versions()).is_ok());
+    }
+
+    #[test]
+    fn test_bounded_one_over_limit_err() {
+        let pkgs: Vec<_> = (0..=MAX_PACKAGES)
+            .map(|i| make(&format!("pkg-{}", i), "1.0.0"))
+            .collect();
+        let err = audit_all_bounded(&pkgs, &default_min_safe_versions()).unwrap_err();
+        assert!(err.contains("MAX_PACKAGES"));
+    }
+
+    // ── Full lockfile snapshot with all three advisories ──────────────────
+
+    #[test]
+    fn test_full_snapshot_all_patched_passes() {
+        let pkgs = vec![
+            make("svgo", "3.3.3"),
+            make("brace-expansion", "2.0.3"),
+            make("handlebars", "4.7.9"),
+        ];
+        let results = audit_all(&pkgs, &default_min_safe_versions());
+        assert!(results.iter().all(|r| r.passed));
+        assert!(failing_results(&results).is_empty());
+    }
+
+    #[test]
+    fn test_full_snapshot_all_vulnerable_fails() {
+        let pkgs = vec![
+            make("svgo", "3.3.2"),
+            make("brace-expansion", "2.0.2"),
+            make("handlebars", "4.7.8"),
+        ];
+        let results = audit_all(&pkgs, &default_min_safe_versions());
+        assert_eq!(failing_results(&results).len(), 3);
+    }
+}

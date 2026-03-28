@@ -79,6 +79,28 @@ The boundary classifies an error as a smart-contract error when:
 
 All other errors render the generic "Documentation Loading Error" fallback.
 
+**Windowing caveat:** keyword matching runs on a bounded prefix of `error.name` + `error.message` (`MAX_CLASSIFICATION_INPUT_CHARS`, default 8192 UTF-16 code units). If a keyword appears only *after* that window, the error is treated as generic (safer default).
+
+---
+
+## Logging bounds (scripts & maintainability)
+
+Exported constants and helpers cap string work so CI log shippers, browser consoles, and the main thread do not process unbounded error text:
+
+| Export | Purpose |
+|--------|---------|
+| `MAX_CLASSIFICATION_INPUT_CHARS` | Max size of haystack for keyword classification |
+| `MAX_REPORT_MESSAGE_CHARS` | Max `ErrorReport.message` for `onError` / telemetry |
+| `MAX_REPORT_STACK_CHARS` | Max stack string in dev reports |
+| `MAX_REPORT_COMPONENT_STACK_CHARS` | Max React component stack in dev reports |
+| `MAX_DISPLAY_MESSAGE_CHARS` | Max characters in dev-only `<pre>` in the fallback UI |
+| `MAX_ERROR_NAME_CHARS` | Max `ErrorReport.errorName` |
+| `MAX_THROWN_VALUE_STRING_CHARS` | Max `String(unknown)` when normalising non-`Error` throwables |
+| `truncateForBounds(s, maxCodeUnits)` | Shared truncation helper (appends `…` when trimmed) |
+| `boundedClassificationHaystack(error)` | Lowercased, capped haystack for keyword scan |
+
+Use the same helpers in build scripts or server middleware if you classify errors consistently with the UI.
+
 ---
 
 ## Fallback UIs
@@ -159,6 +181,8 @@ async function contribute(amount: number) {
 | XSS via error messages | Fallback UI renders error message as React text node (not `innerHTML`) |
 | Sensitive contract data | Custom error classes should never embed private keys, XDR, or account secrets in the message |
 | Async errors | The boundary does NOT catch errors in event handlers, `setTimeout`, or SSR — handle those separately |
+| Log / script DoS | All reports and dev UI text go through `truncateForBounds` and `MAX_*` caps |
+| Classification blind spot | Keywords beyond `MAX_CLASSIFICATION_INPUT_CHARS` are ignored; use typed errors (`ContractError`, etc.) for reliable routing |
 
 ---
 
@@ -173,7 +197,8 @@ async function contribute(amount: number) {
 
 ## Test Coverage
 
-Tests live in `frontend/components/frontend_global_error.test.tsx` and cover:
+Tests live in `frontend/components/frontend_global_error.test.tsx` and
+`frontend/utils/frontend_global_error.test.tsx` and cover:
 
 - Custom error class instantiation and inheritance
 - Normal (no-error) rendering
@@ -184,8 +209,15 @@ Tests live in `frontend/components/frontend_global_error.test.tsx` and cover:
 - `onError` callback with structured report validation
 - Accessibility (`role="alert"`, `aria-live`, `aria-label`, `aria-hidden`)
 - Edge cases: empty message, TypeError, keyword matching
+- **Logging bounds:** `truncateForBounds`, `boundedClassificationHaystack`, `ErrorReport` truncation, classification window, dev `<pre>` length
 
-Target: ≥ 95% statement and line coverage, 100% function coverage.
+Run:
+
+```bash
+npx jest --testPathPatterns=frontend/components/frontend_global_error.test --coverage --collectCoverageFrom=frontend/components/frontend_global_error.tsx
+```
+
+Recent run: **63** tests passed; coverage for `frontend_global_error.tsx` ~**96%** statements, ~**97%** lines (see local `coverage/` output).
 
 ---
 

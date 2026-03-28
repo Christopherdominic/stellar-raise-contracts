@@ -17,6 +17,14 @@
 /// @title   NpmPackageLockAuditor
 /// @notice  Validates package-lock.json entries for security and integrity.
 /// @dev     All checks are pure functions operating on parsed data structs.
+///
+/// ## Known Advisories (updated 2026-03)
+///
+/// | Package         | Advisory            | Vulnerable range          | Fixed in |
+/// |-----------------|---------------------|---------------------------|----------|
+/// | svgo            | GHSA-xpqw-6gx7-v673 | >=3.0.0 <3.3.3            | 3.3.3    |
+/// | brace-expansion | GHSA-f886-m6hf-6m8v | <1.1.13 or >=2.0.0 <2.0.3 | 2.0.3    |
+/// | handlebars      | GHSA-xjpj-3mr7-gcpf | 4.0.0 - 4.7.8             | 4.7.9    |
 
 use std::collections::HashMap;
 
@@ -180,4 +188,47 @@ pub fn failing_results(results: &[AuditResult]) -> Vec<&AuditResult> {
 /// @return         true if the version is supported
 pub fn validate_lockfile_version(version: u32) -> bool {
     version == 2 || version == 3
+}
+
+/// Returns the canonical minimum-safe-version map for all known advisories.
+///
+/// @notice Update this function whenever a new advisory is published or a
+///         patched version is released. Each entry maps a package name to
+///         the first version that is no longer vulnerable.
+///
+/// @dev    brace-expansion has two vulnerable ranges (<1.1.13 and >=2.0.0 <2.0.3).
+///         We track the v2 minimum (2.0.3) as the canonical entry because the
+///         project uses npm >=7 which resolves to v2.x.
+///
+/// @return HashMap<package_name, minimum_safe_version>
+pub fn default_min_safe_versions() -> HashMap<String, String> {
+    let mut m = HashMap::new();
+    // GHSA-xpqw-6gx7-v673: svgo Billion Laughs DoS (>=3.0.0 <3.3.3)
+    m.insert("svgo".to_string(), "3.3.3".to_string());
+    // GHSA-f886-m6hf-6m8v: brace-expansion zero-step ReDoS / memory exhaustion
+    m.insert("brace-expansion".to_string(), "2.0.3".to_string());
+    // GHSA-xjpj-3mr7-gcpf + related: Handlebars JS injection / prototype pollution
+    m.insert("handlebars".to_string(), "4.7.9".to_string());
+    m
+}
+
+/// Bounded variant of `audit_all` — rejects inputs exceeding `MAX_PACKAGES`.
+///
+/// @notice Use this in place of `audit_all` wherever input size is not
+///         statically known, to prevent unbounded processing.
+/// @param packages          Slice of all package entries
+/// @param min_safe_versions Map of package name -> minimum safe version
+/// @return                  Ok(Vec<AuditResult>) or Err with a message
+pub fn audit_all_bounded(
+    packages: &[PackageEntry],
+    min_safe_versions: &HashMap<String, String>,
+) -> Result<Vec<AuditResult>, String> {
+    if packages.len() > MAX_PACKAGES {
+        return Err(format!(
+            "Input exceeds MAX_PACKAGES limit ({} > {}). Split into smaller batches.",
+            packages.len(),
+            MAX_PACKAGES
+        ));
+    }
+    Ok(audit_all(packages, min_safe_versions))
 }
