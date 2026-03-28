@@ -23,6 +23,7 @@ pub mod stellar_token_minter;
 pub mod stream_processing_optimization;
 pub mod withdraw_event_emission;
 pub mod security_compliance_automation;
+pub mod nft_gating;
 
 // ── Imports from modules ──────────────────────────────────────────────────────
 
@@ -81,6 +82,9 @@ mod stream_processing_optimization_test;
 #[cfg(test)]
 #[path = "security_compliance_automation.test.rs"]
 mod security_compliance_automation_test;
+#[cfg(test)]
+#[path = "nft_gating.test.rs"]
+mod nft_gating_test;
 
 // --- Constants ---
 const CONTRACT_VERSION: u32 = 3;
@@ -188,6 +192,8 @@ pub enum DataKey {
     GovernanceAddress,
     /// Boolean flag — when true, contribute() and withdraw() are blocked.
     Paused,
+    /// Optional NFT gate configuration (nft_contract + min_balance).
+    NftGate,
 }
 
 // ── Contract Error ──────────────────────────────────────────────────────────
