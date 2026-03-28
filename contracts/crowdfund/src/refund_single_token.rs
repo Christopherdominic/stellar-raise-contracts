@@ -7,9 +7,6 @@
 //!   status, deadline, goal, and contribution balance before any state change.
 //! - **`execute_refund_single`** — atomic CEI (Checks-Effects-Interactions)
 //!   execution: zero storage first, then transfer, then emit event.
-//! - **`refund_single_transfer`** — thin wrapper around `token::Client::transfer`
-//!   that fixes the direction (contract → contributor) to prevent parameter-order
-//!   typos at call sites.
 //!
 //! ## Security Assumptions
 //!
@@ -19,13 +16,10 @@
 //!    re-entrant call from the token contract cannot double-claim.
 //! 3. **Overflow protection** — `total_raised` is decremented with `checked_sub`;
 //!    the function returns `ContractError::Overflow` rather than wrapping.
-//! 4. **Direction lock** — `refund_single_transfer` always transfers
-//!    `contract → contributor`; the direction cannot be reversed by a caller.
-
-#![allow(missing_docs)]
+//! 4. **Direction lock** — The token transfer explicitly uses the contract's
+//!    address as the sender and the contributor as the recipient.
 
 use soroban_sdk::{token, Address, Env};
-
 use crate::{ContractError, DataKey, Status};
 
 // ── Storage helpers ───────────────────────────────────────────────────────────
@@ -41,6 +35,10 @@ pub fn get_contribution(env: &Env, contributor: &Address) -> i128 {
 /// Low-level refund helper: transfer `amount` from contract to `contributor`
 /// and zero the contribution record. Returns the amount transferred.
 ///
+/// @notice Transfers `amount` tokens from `contract_address` to `contributor`.
+/// @notice Skips transfers where `amount <= 0` to prevent gas waste on no-op calls.
+/// @dev    Keeping this in one place prevents parameter-order typos at call sites.
+/// @dev    Emits debug event before transfer for observability.
 /// Does **not** check campaign status or auth — callers are responsible.
 pub fn refund_single(env: &Env, token_address: &Address, contributor: &Address) -> i128 {
     let amount = get_contribution(env, contributor);
@@ -49,7 +47,12 @@ pub fn refund_single(env: &Env, token_address: &Address, contributor: &Address) 
             .persistent()
             .set(&DataKey::Contribution(contributor.clone()), &0i128);
         let token_client = token::Client::new(env, token_address);
-        refund_single_transfer(&token_client, &env.current_contract_address(), contributor, amount);
+        refund_single_transfer(
+            &token_client,
+            &env.current_contract_address(),
+            contributor,
+            amount,
+        );
     }
     amount
 }
@@ -70,6 +73,16 @@ pub fn refund_single_transfer(
     contributor: &Address,
     amount: i128,
 ) {
+    if amount <= 0 {
+        // Early return prevents gas waste on zero/non-positive amounts
+        return;
+    }
+
+    token_client.env().events().publish(
+        ("debug", "refund_transfer_attempt"),
+        (contributor.clone(), amount),
+    );
+
     token_client.transfer(contract_address, contributor, &amount);
 }
 
@@ -150,12 +163,9 @@ pub fn execute_refund_single(
     // ── Interactions (transfer after state is settled) ────────────────────
     let token_address: Address = env.storage().instance().get(&DataKey::Token).unwrap();
     let token_client = token::Client::new(env, &token_address);
-    refund_single_transfer(
-        &token_client,
-        &env.current_contract_address(),
-        contributor,
-        amount,
-    );
+
+    // Explicitly transfer from contract to contributor
+    token_client.transfer(&env.current_contract_address(), contributor, &amount);
 
     env.events()
         .publish(("campaign", "refund_single"), (contributor.clone(), amount));

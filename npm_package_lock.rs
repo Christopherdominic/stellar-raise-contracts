@@ -10,6 +10,8 @@
 /// - Integrity hashes (sha512) are validated to be non-empty, ensuring
 ///   the lockfile was not tampered with.
 /// - Only `lockfileVersion` 2 and 3 are considered valid (npm >=7).
+/// - `audit_all_bounded` enforces a hard cap on input size to prevent
+///   unbounded processing (gas efficiency / DoS protection).
 ///
 /// ## NatSpec-style Annotations
 /// @title   NpmPackageLockAuditor
@@ -17,6 +19,11 @@
 /// @dev     All checks are pure functions operating on parsed data structs.
 
 use std::collections::HashMap;
+
+/// @notice Hard cap on the number of packages processed by `audit_all_bounded`.
+/// @dev    Prevents unbounded iteration; mirrors gas-limit patterns in
+///         on-chain contracts. Adjust upward only with a documented rationale.
+pub const MAX_PACKAGES: usize = 500;
 
 /// Represents a single resolved package entry from `package-lock.json`.
 ///
@@ -135,6 +142,28 @@ pub fn audit_all(
         .iter()
         .map(|p| audit_package(p, min_safe_versions))
         .collect()
+}
+
+/// Bounded variant of `audit_all` — rejects inputs exceeding `MAX_PACKAGES`.
+///
+/// @notice Use this in place of `audit_all` wherever input size is not
+///         statically known, to prevent unbounded processing and ensure
+///         predictable execution time (gas efficiency / reliability).
+/// @param packages          Slice of all package entries
+/// @param min_safe_versions Map of package name -> minimum safe version
+/// @return                  Ok(Vec<AuditResult>) or Err with a message
+pub fn audit_all_bounded(
+    packages: &[PackageEntry],
+    min_safe_versions: &HashMap<String, String>,
+) -> Result<Vec<AuditResult>, String> {
+    if packages.len() > MAX_PACKAGES {
+        return Err(format!(
+            "Input exceeds MAX_PACKAGES limit ({} > {}). Split into smaller batches.",
+            packages.len(),
+            MAX_PACKAGES
+        ));
+    }
+    Ok(audit_all(packages, min_safe_versions))
 }
 
 /// Returns the subset of audit results that failed.

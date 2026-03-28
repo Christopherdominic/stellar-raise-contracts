@@ -20,6 +20,8 @@ Utility for managing WASM build artifact caching for the Stellar Raise deploymen
 - Manual bulk eviction via `evictExpired()`
 - Cross-network isolation (keys scoped by `<network>.<contractId>`)
 - Zero external dependencies
+ - Bounded memory: configurable max entries with oldest-entry eviction to
+   avoid unbounded memory growth in long-running processes (CI, dev servers)
 
 ## Security
 
@@ -139,6 +141,7 @@ console.log(`Evicted ${removed} stale deploy entries`);
 | `DEFAULT_CACHE_TTL_MS` | `86400000` (24 h) | Default TTL for artifact cache |
 | `SCRIPT_CACHE_TTL_MS` | `3600000` (1 h) | Default TTL for deploy cache |
 | `MAX_CACHE_VALUE_BYTES` | `5242880` (5 MB) | Maximum value size |
+| `MAX_CACHE_ENTRIES` | `100` | Maximum entries in `WasmBuildCache` before LRU eviction |
 | `SUPPORTED_NETWORKS` | `testnet`, `mainnet`, `futurenet`, `localnet` | Valid network names |
 
 ## Running Tests
@@ -147,7 +150,7 @@ console.log(`Evicted ${removed} stale deploy entries`);
 npx jest scripts/wasm_build_pipeline.test.tsx --coverage
 ```
 
-Expected coverage: ≥ 95% statements, branches, functions, and lines.
+Expected coverage: 100% statements, branches, functions, and lines (132 tests).
 
 ## Notes
 

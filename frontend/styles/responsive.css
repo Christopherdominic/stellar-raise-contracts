@@ -12,6 +12,14 @@
   /* Breakpoints */
   --breakpoint-mobile: 768px;
   --breakpoint-tablet: 1024px;
+
+  /* Header height tokens — consumed by Header.css and .has-header */
+  --header-height-mobile:  48px;
+  --header-height-tablet:  56px;
+  --header-height-desktop: 64px;
+
+  /* Alias — resolves to the correct per-breakpoint value via media queries below */
+  --header-height: var(--header-height-mobile);
   
   /* Brand Colors */
   --color-primary-blue: #0066FF;
@@ -91,6 +99,56 @@
   --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
   --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
   --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+}
+
+/* Update --header-height alias per breakpoint */
+@media (min-width: 768px) {
+  :root {
+    --header-height: var(--header-height-tablet);
+  }
+}
+
+@media (min-width: 1024px) {
+  :root {
+    --header-height: var(--header-height-desktop);
+  }
+}
+
+/* ============================================
+   HEADER HEIGHT ALIAS — per-breakpoint overrides
+   ============================================ */
+
+/* Tablet: header is hidden at ≥ 768px (sidebar takes over), but token is
+   still updated so layout-offset calculations remain consistent. */
+@media (min-width: 768px) {
+  :root {
+    --header-height: var(--header-height-tablet);
+  }
+}
+
+@media (min-width: 1024px) {
+  :root {
+    --header-height: var(--header-height-desktop);
+  }
+}
+
+/* ============================================
+   HEADER LAYOUT OFFSET
+   ============================================ */
+
+/**
+ * Apply to <main> when the fixed site-header is present (mobile only).
+ * Resets to 0 on tablet+ because the header is hidden and the sidebar
+ * handles brand identity instead.
+ */
+.has-header {
+  padding-top: calc(var(--header-height) + var(--safe-area-inset-top, 0px));
+}
+
+@media (min-width: 768px) {
+  .has-header {
+    padding-top: 0;
+  }
 }
 
 /* ============================================
@@ -267,6 +325,18 @@ body {
 .mb-4 { margin-bottom: var(--space-4); }
 .ml-4 { margin-left: var(--space-4); }
 .mr-4 { margin-right: var(--space-4); }
+
+/* Layout offset for pages that include the fixed site header (mobile only) */
+.has-header {
+  padding-top: calc(var(--header-height) + var(--safe-area-inset-top));
+}
+
+/* On tablet+, the header is hidden and the Sidebar takes over — reset offset */
+@media (min-width: 768px) {
+  .has-header {
+    padding-top: 0;
+  }
+}
 
 /* ============================================
    TOUCH TARGET OPTIMIZATION

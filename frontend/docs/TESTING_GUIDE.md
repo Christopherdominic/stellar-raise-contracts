@@ -135,6 +135,55 @@ This document provides comprehensive testing procedures for the Stellar Raise re
 
 ### Navigation Testing
 
+#### Site Header (Mobile < 768px)
+
+**Test Steps:**
+1. Open `frontend/components/navigation/Header.html` at 375 px viewport
+2. Verify `.site-header` is visible and fixed at the top
+3. Measure computed height — must be between 48 px and 64 px
+4. Verify `box-shadow` equals `var(--shadow-sm)` at `scrollY = 0`
+5. Scroll page to `scrollY = 1`; verify `.site-header--scrolled` class is present and `box-shadow` equals `var(--shadow-md)`
+6. Resize to 768 px; verify `.site-header` has `display: none`
+7. Resize to 1280 px; verify `.site-header` has `display: none` and `.sidebar` is visible
+
+**Expected Results:**
+- Header visible and fixed on mobile; hidden on tablet/desktop
+- Height within spec at each breakpoint
+- Shadow elevates on scroll; resets when scrolled back to top
+- Sidebar and header are never simultaneously visible
+
+**Skip Link Keyboard Test:**
+1. Tab from outside the header
+2. Verify first focused element matches `.site-header__skip-link`
+3. Press Enter; verify `document.activeElement.id === 'main-content'`
+
+**Safe Area Inset Test:**
+1. Simulate `env(safe-area-inset-top) = 44px` (Chrome DevTools → Sensors)
+2. Verify header `padding-top` is `44px`
+3. Verify `.has-header` `padding-top` equals `header-height + 44px`
+
+**Accessibility Audit:**
+1. Run axe-core against `Header.html` at 375 px, 768 px, and 1280 px
+2. Assert zero WCAG 2.1 AA violations
+
+**Reduced Motion Test:**
+1. Enable `prefers-reduced-motion: reduce` in DevTools
+2. Verify `.site-header` `transition-duration` ≤ 0.01 ms
+
+**Touch Target Test:**
+```javascript
+// Run in browser console at 375px viewport
+document.querySelectorAll('.site-header a, .site-header button').forEach(el => {
+  const rect = el.getBoundingClientRect();
+  if (rect.width < 44 || rect.height < 44) {
+    console.warn('Touch target too small:', el, rect);
+  }
+});
+// Expected: no warnings
+```
+
+---
+
 #### Bottom Navigation (Mobile)
 
 **Test Steps:**

@@ -19,6 +19,7 @@ import {
   DEFAULT_CACHE_TTL_MS,
   SCRIPT_CACHE_TTL_MS,
   MAX_CACHE_VALUE_BYTES,
+  MAX_CACHE_ENTRIES,
   SUPPORTED_NETWORKS,
   ScriptDeployInput,
 } from './wasm_build_pipeline';
@@ -474,6 +475,19 @@ describe('WasmBuildCache', () => {
       expect(stats.expiredEntries).toBe(0);
       expect(stats.validEntries).toBe(0);
       expect(stats.keys).toHaveLength(0);
+    });
+    it('enforces MAX_CACHE_ENTRIES eviction when over capacity', () => {
+      // Fill more entries than MAX_CACHE_ENTRIES and validate oldest were evicted
+      const many = (MAX_CACHE_ENTRIES || 50) + 10; // fallback just in case
+      for (let i = 0; i < many; i++) {
+        cache.set(`k${i}`, VALID_VALUE, VALID_HASH);
+      }
+      const stats = cache.getStats();
+      expect(stats.totalEntries).toBeLessThanOrEqual(MAX_CACHE_ENTRIES);
+      // earliest key k0 should have been evicted
+      expect(cache.get('k0')).toBeNull();
+      // most recent key should still exist
+      expect(cache.get(`k${many - 1}`)).not.toBeNull();
     });
   });
 

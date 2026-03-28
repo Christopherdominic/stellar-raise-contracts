@@ -1,135 +1,401 @@
-//! Logging bounds for the Stellar token minter / crowdfund contract.
+//! # Stellar Token Minter Contract
 //!
-//! Soroban contracts run inside a metered host environment where every event
-//! emission and every storage read/write consumes CPU and memory instructions.
-//! Unbounded iteration over contributor or pledger lists therefore creates a
-//! denial-of-service vector: a campaign with thousands of contributors could
-//! make `withdraw` or `collect_pledges` exceed the per-transaction resource
-//! limits and become permanently un-callable.
+//! @title   StellarTokenMinter
+//! @notice  NFT minting contract for the Stellar Raise crowdfunding platform.
+//!          Authorized contracts (e.g. the Crowdfund contract) call `mint` to
+//!          issue on-chain reward NFTs to campaign contributors.
+//! @dev     Implements the Checks-Effects-Interactions pattern throughout.
+//!          All state-changing functions enforce `require_auth` before any
+//!          storage writes or event emissions.
 //!
-//! This module centralises the bound-checking logic so that:
-//! * The limits are defined in one place and easy to audit.
-//! * Helper functions can be unit-tested in isolation.
-//! * The contract implementation stays readable.
+//! ## Security Model
 //!
-//! # Limits
+//! - **Authorization**: Only the designated minter can call `mint`
+//!   (enforced via `require_auth` on the stored minter address).
+//! - **Admin Separation**: Admin role is separate from minter role
+//!   (principle of least privilege — admin cannot mint directly).
+//! - **State Management**: Persistent storage is used for token metadata;
+//!   instance storage is used for roles and the counter.
+//! - **Bounded Operations**: All operations stay within Soroban resource limits.
+//! - **Idempotency**: Duplicate token minting is rejected via a persistent-storage
+//!   existence check before any write.
+//! - **Initialization Guard**: Contract can only be initialized once; a second
+//!   call panics with "already initialized".
 //!
-//! | Constant | Value | Governs |
-//! |---|---|---|
-//! | [`MAX_EVENTS_PER_TX`] | 100 | Total events emitted in one transaction |
-//! | [`MAX_MINT_BATCH`] | 50 | NFT mints per `withdraw` call |
-//! | [`MAX_LOG_ENTRIES`] | 200 | Diagnostic log entries per transaction |
+//! ## Deprecated Patterns (v1.0)
 //!
-//! # Security assumptions
+//! The following patterns have been deprecated in favour of more secure implementations:
+//! - Direct admin minting (now requires the dedicated minter role)
+//! - Unguarded initialization (now panics on double-init)
+//! - Implicit authorization (now explicit via `require_auth`)
 //!
-//! * Limits are enforced **before** the loop that would exceed them, not after.
-//! * All arithmetic uses `checked_*` to prevent overflow.
-//! * No limit can be bypassed by the caller — they are compile-time constants.
+//! ## Invariants
+//!
+//! 1. `total_minted` equals the count of unique token IDs that have been minted.
+//! 2. Each token ID can only be minted once (persistent storage existence check).
+//! 3. Only the designated minter can call `mint` (`require_auth` enforced).
+//! 4. Only the admin can update the minter address (`require_auth` enforced).
+//! 5. Contract state is immutable after initialization (no re-initialization).
 
-use soroban_sdk::Env;
+// stellar_token_minter — NFT minting capabilities for the crowdfunding platform.
 
-// ── Constants ────────────────────────────────────────────────────────────────
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
 
-/// Maximum number of events that may be emitted in a single transaction.
-///
-/// Soroban's host enforces its own hard cap; this constant is a conservative
-/// application-level guard that keeps us well below that limit.
+// ── Test constants ────────────────────────────────────────────────────────────//
+// Centralised numeric literals used across the stellar_token_minter test suites.
+// Defining them here means CI/CD only needs to update one location when campaign
+// parameters change, and test intent is self-documenting.
+
+/// Default campaign funding goal used in tests (1 000 000 stroops).
+pub const TEST_GOAL: i128 = 1_000_000;
+
+/// Default minimum contribution used in tests (1 000 stroops).
+pub const TEST_MIN_CONTRIBUTION: i128 = 1_000;
+
+/// Default campaign duration used in tests (1 hour in seconds).
+pub const TEST_DEADLINE_OFFSET: u64 = 3_600;
+
+/// Initial token balance minted to the creator in the test setup helper.
+pub const TEST_CREATOR_BALANCE: i128 = 100_000_000;
+
+/// Initial token balance minted to the token-minter test setup helper.
+pub const TEST_MINTER_CREATOR_BALANCE: i128 = 10_000_000;
+
+/// Standard single-contributor balance used in most integration tests.
+pub const TEST_CONTRIBUTOR_BALANCE: i128 = 1_000_000;
+
+/// Contribution amount used in NFT-batch tests (goal / MAX_MINT_BATCH).
+pub const TEST_NFT_CONTRIBUTION: i128 = 25_000;
+
+/// Contribution amount used in the "below batch limit" NFT test.
+pub const TEST_NFT_SMALL_CONTRIBUTION: i128 = 400_000;
+
+/// Contribution amount used in collect_pledges / two-contributor tests.
+pub const TEST_PLEDGE_CONTRIBUTION: i128 = 300_000;
+
+/// Bonus goal threshold used in idempotency tests.
+pub const TEST_BONUS_GOAL: i128 = 1_000_000;
+
+/// Primary goal used in bonus-goal idempotency tests.
+pub const TEST_BONUS_PRIMARY_GOAL: i128 = 500_000;
+
+/// Per-contribution amount used in bonus-goal crossing tests.
+pub const TEST_BONUS_CONTRIBUTION: i128 = 600_000;
+
+/// Seed balance for overflow protection test (small initial contribution).
+pub const TEST_OVERFLOW_SEED: i128 = 10_000;
+
+/// Maximum platform fee in basis points (100 %).
+pub const TEST_FEE_BPS_MAX: u32 = 10_000;
+
+/// Platform fee that exceeds the maximum (triggers panic).
+pub const TEST_FEE_BPS_OVER: u32 = 10_001;
+
+/// Platform fee of 10 % used in fee-deduction tests.
+pub const TEST_FEE_BPS_10PCT: u32 = 1_000;
+
+/// Progress basis points representing 80 % funding.
+pub const TEST_PROGRESS_BPS_80PCT: u32 = 8_000;
+
+/// Progress basis points representing 99.999 % funding (just below goal).
+pub const TEST_PROGRESS_BPS_JUST_BELOW: u32 = 9_999;
+
+/// Contribution amount that is one stroop below the goal.
+pub const TEST_JUST_BELOW_GOAL: i128 = 999_999;
+
+/// Contribution amount used in the "partial accumulation" test.
+pub const TEST_PARTIAL_CONTRIBUTION_A: i128 = 300_000;
+
+/// Second contribution amount used in the "partial accumulation" test.
+pub const TEST_PARTIAL_CONTRIBUTION_B: i128 = 200_000;
+
+// ── Event / mint budget helpers ───────────────────────────────────────────────
+
+/// Maximum events allowed per Soroban transaction.
 pub const MAX_EVENTS_PER_TX: u32 = 100;
 
-/// Maximum number of NFT mint calls (and their associated events) that
-/// `withdraw` will process in one invocation.
-///
-/// Mirrors [`crate::MAX_NFT_MINT_BATCH`] and is re-exported here so that
-/// tests can import it from a single location.
+/// Maximum NFTs minted in a single `withdraw()` call.
 pub const MAX_MINT_BATCH: u32 = 50;
 
-/// Maximum number of diagnostic log entries per transaction.
-///
-/// Kept separate from [`MAX_EVENTS_PER_TX`] because diagnostic logs are
-/// cheaper but still bounded to prevent runaway output.
-pub const MAX_LOG_ENTRIES: u32 = 200;
+/// Maximum log entries per transaction.
+pub const MAX_LOG_ENTRIES: u32 = 64;
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-/// Returns `true` when `count` is within the per-transaction event budget.
-///
-/// # Arguments
-/// * `count` – Number of events already scheduled for this transaction.
-///
-/// # Examples
-/// ```ignore
-/// assert!(within_event_budget(99));
-/// assert!(!within_event_budget(100));
-/// ```
+/// Returns `true` if `emitted` is below `MAX_EVENTS_PER_TX`.
 #[inline]
-pub fn within_event_budget(count: u32) -> bool {
-    count < MAX_EVENTS_PER_TX
+pub fn within_event_budget(emitted: u32) -> bool {
+    emitted < MAX_EVENTS_PER_TX
 }
 
-/// Returns `true` when `count` is within the NFT mint batch limit.
-///
-/// # Arguments
-/// * `count` – Number of NFTs already minted in this `withdraw` call.
+/// Returns `true` if `minted` is below `MAX_MINT_BATCH`.
 #[inline]
-pub fn within_mint_batch(count: u32) -> bool {
-    count < MAX_MINT_BATCH
+pub fn within_mint_batch(minted: u32) -> bool {
+    minted < MAX_MINT_BATCH
 }
 
-/// Returns `true` when `count` is within the diagnostic log entry limit.
-///
-/// # Arguments
-/// * `count` – Number of log entries already written in this transaction.
+/// Returns `true` if `logged` is below `MAX_LOG_ENTRIES`.
 #[inline]
-pub fn within_log_budget(count: u32) -> bool {
-    count < MAX_LOG_ENTRIES
+pub fn within_log_budget(logged: u32) -> bool {
+    logged < MAX_LOG_ENTRIES
 }
 
-/// Calculates how many items can still be processed before the event budget
-/// is exhausted, given that `reserved` events are already committed.
-///
-/// Returns `0` when the budget is already exhausted.
-///
-/// # Arguments
-/// * `reserved` – Events already emitted or guaranteed to be emitted.
+/// Returns remaining event budget (saturates at 0).
+#[inline]
 pub fn remaining_event_budget(reserved: u32) -> u32 {
     MAX_EVENTS_PER_TX.saturating_sub(reserved)
 }
 
-/// Calculates how many NFT mints remain in the current batch budget.
-///
-/// Returns `0` when the batch limit is already reached.
-///
-/// # Arguments
-/// * `minted` – NFTs already minted in this `withdraw` call.
+/// Returns remaining mint budget (saturates at 0).
+#[inline]
 pub fn remaining_mint_budget(minted: u32) -> u32 {
     MAX_MINT_BATCH.saturating_sub(minted)
 }
 
-/// Emits a bounded summary event for a batch operation.
-///
-/// Instead of emitting one event per item (which would be unbounded), callers
-/// emit a single summary event carrying the count of processed items.  This
-/// function enforces that the summary is only emitted when `count > 0` and
-/// that the event budget has not been exhausted.
-///
-/// # Arguments
-/// * `env`      – The Soroban environment.
-/// * `topic`    – Two-part event topic `(namespace, name)`.
-/// * `count`    – Number of items processed in the batch.
-/// * `emitted`  – Events already emitted in this transaction (budget check).
-///
-/// # Returns
-/// `true` if the event was emitted, `false` if skipped (count == 0 or budget
-/// exhausted).
+/// Emits a batch summary event if `count > 0` and budget is not exhausted.
+/// Returns `true` if the event was emitted.
 pub fn emit_batch_summary(
     env: &Env,
-    topic: (&'static str, &'static str),
+    topic: (&str, &str),
     count: u32,
-    emitted: u32,
+    emitted_so_far: u32,
 ) -> bool {
-    if count == 0 || !within_event_budget(emitted) {
+    if count == 0 || !within_event_budget(emitted_so_far) {
         return false;
     }
-    env.events().publish((topic.0, topic.1), count);
+    env.events().publish(
+        (Symbol::new(env, topic.0), Symbol::new(env, topic.1)),
+        count,
+    );
     true
+}
+
+// ── Constants ────────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+#[contracttype]
+pub enum DataKey {
+    /// Admin address with authority to update the minter role.
+    Admin,
+    /// Minter address with authority to mint new tokens.
+    Minter,
+    /// Total count of tokens minted (u64 counter).
+    TotalMinted,
+    /// Token metadata storage: maps token_id to owner address.
+    TokenMetadata(u64),
+}
+
+#[contract]
+pub struct StellarTokenMinter;
+
+#[contractimpl]
+impl StellarTokenMinter {
+    /// Initializes the minter contract with admin and minter roles.
+    ///
+    /// # Arguments
+    ///
+    /// * `admin` - Contract administrator with authority to update the minter role
+    /// * `minter` - Address authorized to perform minting operations
+    ///
+    /// # Panics
+    ///
+    /// * If the contract has already been initialized (idempotency guard)
+    ///
+    /// # Security Notes
+    ///
+    /// - This function can only be called once per contract instance
+    /// - Admin and minter roles are stored separately for principle of least privilege
+    /// - No authorization check is performed on initialization (assumed to be called by contract deployer)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let admin = Address::generate(&env);
+    /// let minter = Address::generate(&env);
+    /// StellarTokenMinter::initialize(env, admin, minter);
+    /// ```
+    pub fn initialize(env: Env, admin: Address, minter: Address) {
+        // Guard: Prevent double initialization
+        if env.storage().instance().has(&DataKey::Admin) {
+            panic!("already initialized");
+        }
+
+        // Store admin and minter roles
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::Minter, &minter);
+        
+        // Initialize total minted counter to zero
+        env.storage().instance().set(&DataKey::TotalMinted, &0u64);
+    }
+
+    /// Mints a new NFT to the specified recipient.
+    ///
+    /// # Arguments
+    ///
+    /// * `to` - Recipient address (owner of the minted token)
+    /// * `token_id` - Unique identifier for the token to mint
+    ///
+    /// # Panics
+    ///
+    /// * If the caller is not the designated minter (authorization check)
+    /// * If the token ID has already been minted (idempotency check)
+    ///
+    /// # Security Notes
+    ///
+    /// - **Authorization**: Enforced via `require_auth()` on the minter address
+    /// - **Idempotency**: Token IDs are unique; duplicate mints are rejected
+    /// - **State Consistency**: Total minted counter is incremented atomically
+    /// - **Event Emission**: Emits a mint event for off-chain tracking
+    ///
+    /// # Invariants Maintained
+    ///
+    /// - `total_minted` increases by exactly 1 on successful mint
+    /// - Each token_id maps to exactly one owner address
+    /// - Only the minter can call this function
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let recipient = Address::generate(&env);
+    /// let token_id = 42u64;
+    /// StellarTokenMinter::mint(env, recipient, token_id);
+    /// assert_eq!(StellarTokenMinter::owner(env, token_id), Some(recipient));
+    /// ```
+    pub fn mint(env: Env, to: Address, token_id: u64) {
+        // Guard: Retrieve and verify minter authorization
+        let minter: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Minter)
+            .expect("contract not initialized");
+        minter.require_auth();
+
+        // Guard: Prevent duplicate token minting
+        let key = DataKey::TokenMetadata(token_id);
+        if env.storage().persistent().has(&key) {
+            panic!("token already minted");
+        }
+
+        // Effect: Store token metadata (owner address)
+        env.storage().persistent().set(&key, &to);
+
+        // Effect: Increment total minted counter
+        let total: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalMinted)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalMinted, &(total + 1));
+
+        // Interaction: Emit mint event for off-chain tracking
+        env.events().publish((Symbol::new(&env, "mint"), to), token_id);
+    }
+
+    /// Returns the owner of a token, or None if the token has not been minted.
+    ///
+    /// # Arguments
+    ///
+    /// * `token_id` - The token ID to query
+    ///
+    /// # Returns
+    ///
+    /// * `Some(Address)` if the token has been minted
+    /// * `None` if the token has not been minted
+    ///
+    /// # Security Notes
+    ///
+    /// - This is a read-only view function with no authorization requirements
+    /// - Returns None for unminted tokens (safe default)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let owner = StellarTokenMinter::owner(env, 42u64);
+    /// assert_eq!(owner, Some(recipient));
+    /// ```
+    pub fn owner(env: Env, token_id: u64) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TokenMetadata(token_id))
+    }
+
+    /// Returns the total number of NFTs minted by this contract.
+    ///
+    /// # Returns
+    ///
+    /// The count of unique token IDs that have been successfully minted.
+    ///
+    /// # Security Notes
+    ///
+    /// - This is a read-only view function with no authorization requirements
+    /// - Returns 0 if the contract has not been initialized
+    /// - Guaranteed to be accurate (incremented atomically on each mint)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let count = StellarTokenMinter::total_minted(env);
+    /// assert_eq!(count, 42);
+    /// ```
+    pub fn total_minted(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalMinted)
+            .unwrap_or(0)
+    }
+
+    /// Updates the minter address. Only callable by the admin.
+    ///
+    /// # Arguments
+    ///
+    /// * `admin` - The current admin address (must match stored admin)
+    /// * `new_minter` - The new address to be granted minter privileges
+    ///
+    /// # Panics
+    ///
+    /// * If the contract has not been initialized
+    /// * If the caller is not the admin (authorization check)
+    /// * If the provided admin address does not match the stored admin
+    ///
+    /// # Security Notes
+    ///
+    /// - **Authorization**: Enforced via `require_auth()` on the admin address
+    /// - **Verification**: Admin address must match the stored admin (prevents spoofing)
+    /// - **Atomicity**: Minter role is updated atomically
+    /// - **Principle of Least Privilege**: Only admin can update minter role
+    ///
+    /// # Invariants Maintained
+    ///
+    /// - Only the admin can call this function
+    /// - The new minter address is stored immediately
+    /// - Previous minter loses minting privileges
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let new_minter = Address::generate(&env);
+    /// StellarTokenMinter::set_minter(env, admin, new_minter);
+    /// // new_minter can now call mint()
+    /// ```
+    pub fn set_minter(env: Env, admin: Address, new_minter: Address) {
+        // Guard: Retrieve stored admin (panics if not initialized)
+        let current_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("contract not initialized");
+
+        // Guard: Verify caller is the admin
+        current_admin.require_auth();
+
+        // Guard: Verify provided admin matches stored admin (prevents spoofing)
+        if admin != current_admin {
+            panic!("unauthorized");
+        }
+
+        // Effect: Update minter role
+        env.storage()
+            .instance()
+            .set(&DataKey::Minter, &new_minter);
+    }
 }

@@ -3,12 +3,12 @@
 /// Comprehensive test suite for the `npm_package_lock` contract module.
 ///
 /// ## Coverage targets
-/// - `parse_semver`            — valid, edge-case, and invalid inputs
-/// - `is_version_gte`          — boundary comparisons
-/// - `validate_integrity`      — sha512 presence and format
-/// - `audit_package`           — pass/fail scenarios per advisory
-/// - `audit_all`               — batch audit correctness
-/// - `failing_results`         — filter helper
+/// - `parse_semver`              — valid, edge-case, and invalid inputs
+/// - `is_version_gte`            — boundary comparisons
+/// - `validate_integrity`        — sha512 presence and format
+/// - `audit_package`             — pass/fail scenarios per advisory
+/// - `audit_all`                 — batch audit correctness
+/// - `failing_results`           — filter helper
 /// - `validate_lockfile_version` — supported/unsupported versions
 ///
 /// ## Security notes
@@ -16,12 +16,17 @@
 /// - Boundary tests ensure off-by-one errors in version comparisons are caught.
 /// - Integrity tests guard against tampered or incomplete lockfile entries.
 
+// Include the contract source so this file is self-contained and compilable
+// without a Cargo project: `rustc --test npm_package_lock.test.rs`
+#[path = "npm_package_lock.rs"]
+mod npm_package_lock;
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     // Pull in the contract functions directly (same crate)
-    use crate::{
+    use npm_package_lock::{
         audit_all, audit_package, failing_results, is_version_gte, parse_semver,
         validate_integrity, validate_lockfile_version, PackageEntry,
     };
@@ -332,5 +337,64 @@ mod tests {
     #[test]
     fn test_lockfile_version_4_invalid() {
         assert!(!validate_lockfile_version(4));
+    }
+
+    // -----------------------------------------------------------------------
+    // audit_all_bounded — logging bounds / gas efficiency
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_bounded_within_limit_returns_ok() {
+        let packages = vec![make_entry("svgo", "3.3.3", VALID_HASH, true)];
+        assert!(audit_all_bounded(&packages, &safe_versions()).is_ok());
+    }
+
+    #[test]
+    fn test_bounded_empty_input_returns_ok() {
+        assert!(audit_all_bounded(&[], &safe_versions()).is_ok());
+    }
+
+    #[test]
+    fn test_bounded_results_match_audit_all() {
+        let packages = vec![
+            make_entry("svgo", "3.3.2", VALID_HASH, true),
+            make_entry("svgo", "3.3.3", VALID_HASH, true),
+        ];
+        let bounded = audit_all_bounded(&packages, &safe_versions()).unwrap();
+        let unbounded = audit_all(&packages, &safe_versions());
+        assert_eq!(bounded, unbounded);
+    }
+
+    #[test]
+    fn test_bounded_exactly_at_limit_returns_ok() {
+        let packages: Vec<_> = (0..MAX_PACKAGES)
+            .map(|i| make_entry(&format!("pkg-{}", i), "1.0.0", VALID_HASH, false))
+            .collect();
+        assert!(audit_all_bounded(&packages, &safe_versions()).is_ok());
+    }
+
+    #[test]
+    fn test_bounded_one_over_limit_returns_err() {
+        let packages: Vec<_> = (0..=MAX_PACKAGES)
+            .map(|i| make_entry(&format!("pkg-{}", i), "1.0.0", VALID_HASH, false))
+            .collect();
+        let err = audit_all_bounded(&packages, &safe_versions()).unwrap_err();
+        assert!(err.contains("MAX_PACKAGES"));
+        assert!(err.contains(&MAX_PACKAGES.to_string()));
+    }
+
+    #[test]
+    fn test_bounded_error_message_contains_actual_count() {
+        let count = MAX_PACKAGES + 10;
+        let packages: Vec<_> = (0..count)
+            .map(|i| make_entry(&format!("pkg-{}", i), "1.0.0", VALID_HASH, false))
+            .collect();
+        let err = audit_all_bounded(&packages, &safe_versions()).unwrap_err();
+        assert!(err.contains(&count.to_string()));
+    }
+
+    #[test]
+    fn test_max_packages_constant_is_positive() {
+        assert!(MAX_PACKAGES > 0);
     }
 }

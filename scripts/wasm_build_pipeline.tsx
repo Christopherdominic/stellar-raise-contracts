@@ -44,6 +44,15 @@ export const SCRIPT_CACHE_TTL_MS = 60 * 60 * 1000;
 export const MAX_CACHE_VALUE_BYTES = 5 * 1024 * 1024;
 
 /**
+ * @notice Maximum number of entries kept in the general WasmBuildCache.
+ * @dev When exceeded, the cache evicts the oldest entries (simple LRU by
+ *      insertion time) to avoid unbounded memory growth in long-running
+ *      processes (CI runners, dev servers). Pick a conservative default
+ *      that keeps tests fast but prevents denial-of-service via many keys.
+ */
+export const MAX_CACHE_ENTRIES = 100;
+
+/**
  * @notice Supported Stellar networks
  */
 export const SUPPORTED_NETWORKS = ['testnet', 'mainnet', 'futurenet', 'localnet'] as const;
@@ -210,7 +219,7 @@ export class WasmCacheValidator {
    * @throws WasmCacheError if the value is unsafe or exceeds the size limit
    */
   static validateValue(value: string): void {
-    if (new TextEncoder().encode(value).length > MAX_CACHE_VALUE_BYTES) {
+    if (Buffer.byteLength(value, 'utf8') > MAX_CACHE_VALUE_BYTES) {
       throw new WasmCacheError(
         `Cache value exceeds the maximum allowed size of ${MAX_CACHE_VALUE_BYTES} bytes.`
       );
@@ -353,6 +362,22 @@ export class WasmBuildCache {
       expiresAt: now + ttl,
       label: opts.label,
     });
+
+    // Ensure we don't exceed the configured maximum entry count in long
+    // running processes. Evict oldest entries (by createdAt) until we're
+    // within the limit. This prevents unbounded memory growth and makes
+    // cache behaviour deterministic under adversarial key churn.
+    if (this._store.size > MAX_CACHE_ENTRIES) {
+      // remove oldest entries until size <= MAX_CACHE_ENTRIES
+      const entries = Array.from(this._store.entries());
+      // Each entry: [key, WasmCacheEntry]
+      entries.sort((a, b) => a[1].createdAt - b[1].createdAt);
+      let idx = 0;
+      while (this._store.size > MAX_CACHE_ENTRIES && idx < entries.length) {
+        this._store.delete(entries[idx][0]);
+        idx++;
+      }
+    }
   }
 
   /**
